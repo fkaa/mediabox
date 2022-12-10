@@ -72,7 +72,6 @@ impl CodecDescription {
     pub fn into_subtitle(self) -> Option<SubtitleDescription> {
         match self {
             CodecDescription::Subtitle(desc) => Some(desc),
-            _ => None,
         }
     }
 }
@@ -86,7 +85,6 @@ impl Decoded {
     pub fn into_subtitle(self) -> Option<TextCue> {
         match self {
             Decoded::Subtitle(cue) => Some(cue),
-            _ => None,
         }
     }
 }

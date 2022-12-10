@@ -1,4 +1,3 @@
-use anyhow::Context;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncSeek, AsyncWrite, BufReader};
 
 #[cfg(feature = "fs")]
@@ -7,7 +6,7 @@ use tokio::fs::File;
 use downcast::{downcast, Any};
 use fluent_uri::Uri;
 
-use std::{fmt, io::SeekFrom, path::Path};
+use std::{io::SeekFrom, path::Path};
 
 use crate::Span;
 
@@ -41,10 +40,10 @@ pub enum Reader {
 
 #[cfg(feature = "wasm")]
 mod wasm {
+    use log::info;
     use std::io;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use log::info;
     use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncSeek, AsyncWrite, BufReader, ReadBuf};
     use wasm_bindgen::JsCast;
     use wasm_streams::readable::{IntoAsyncRead, ReadableStream};

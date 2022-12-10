@@ -6,7 +6,7 @@ use std::{collections::HashMap, time::Duration};
 
 use crate::{
     codec::nal::{convert_bitstream, frame_nal_units, BitstreamFraming},
-    format::{Muxer},
+    format::Muxer,
     io::Io,
     muxer, AudioCodec, AudioInfo, H264Codec, MediaDuration, MediaKind, MediaTime, Packet, Span,
     Track, VideoCodec, VideoInfo,
@@ -365,7 +365,6 @@ impl FragmentedMp4Muxer {
         Ok(segment)
     }
 
-
     fn assign_streams(&mut self, streams: &[Track]) {
         use crate::media::MediaTrackExt;
 
@@ -379,7 +378,6 @@ impl FragmentedMp4Muxer {
 
         if let Some(audio) = streams.audio() {
             self.track_mapping.insert(audio.id, track_number);
-            track_number += 1;
 
             self.audio = Some(audio.clone());
         }

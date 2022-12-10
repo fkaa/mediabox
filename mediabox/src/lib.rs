@@ -1,5 +1,4 @@
 #![feature(str_split_as_str)] // used by ASS decoder
-#![feature(mixed_integer_ops)] // used by ASS decoder
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
@@ -19,7 +18,7 @@ pub mod io;
 pub use media::*;
 pub use span::Span;
 
-use format::{DemuxerMetadata, ProbeResult, MuxerMetadata};
+use format::{DemuxerMetadata, MuxerMetadata, ProbeResult};
 use io::Io;
 
 pub struct MediaContext {
@@ -35,9 +34,7 @@ impl MediaContext {
     }
 
     pub fn register_demuxers(&mut self) {
-        let demuxers = [
-            format::mkv::DEMUXER_META,
-        ];
+        let demuxers = [format::mkv::DEMUXER_META];
 
         for meta in demuxers {
             self.demuxer_meta.insert(meta.name.to_string(), meta);
@@ -45,7 +42,9 @@ impl MediaContext {
     }
 
     pub fn find_decoder_for_track(&self, track: &Track) -> anyhow::Result<Box<dyn Decoder>> {
-        let mut decoder = self.decoder_meta.get(track.info.name)
+        let mut decoder = self
+            .decoder_meta
+            .get(track.info.name)
             .map(|m| m.create())
             .ok_or_else(|| anyhow::anyhow!("No decoder found for {:?}", track.info.name))?;
 
@@ -54,10 +53,12 @@ impl MediaContext {
         Ok(decoder)
     }
 
-
-    pub fn find_encoder_with_params(&self, name: &str, info: &MediaInfo) -> anyhow::Result<Box<dyn Encoder>> {
-        let mut encoder = self.encoder_meta.get(name)
-            .map(|m| m.create());
+    pub fn find_encoder_with_params(
+        &self,
+        name: &str,
+        info: &MediaInfo,
+    ) -> anyhow::Result<Box<dyn Encoder>> {
+        let mut encoder = self.encoder_meta.get(name).map(|m| m.create());
 
         if let Some(ref mut encoder) = &mut encoder {
             encoder.start(CodecDescription::Subtitle(SubtitleDescription::default()))?;
@@ -72,7 +73,8 @@ impl MediaContext {
             .await
             .context("Failed to probe I/O for data")?;
 
-        self.find_demuxer(data).ok_or_else(|| anyhow::anyhow!("Failed to find a demuxer"))
+        self.find_demuxer(data)
+            .ok_or_else(|| anyhow::anyhow!("Failed to find a demuxer"))
     }
 
     fn find_demuxer(&self, data: &[u8]) -> Option<DemuxerMetadata> {

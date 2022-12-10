@@ -1,10 +1,5 @@
 use anyhow::Context;
 
-use mediabox::{
-    format::{Demuxer},
-    io::Io,
-};
-
 async fn run() -> anyhow::Result<()> {
     let mut parser = lexopt::Parser::from_env();
 

@@ -1,6 +1,6 @@
 use super::{
-    ColorType, Decoded, Decoder, TextAlign, TextAlpha, TextCue, TextFill, TextPart,
-    TextPosition, TextStyle,
+    ColorType, Decoded, Decoder, TextAlign, TextAlpha, TextCue, TextFill, TextPart, TextPosition,
+    TextStyle,
 };
 use crate::{decoder, MediaInfo, Packet};
 

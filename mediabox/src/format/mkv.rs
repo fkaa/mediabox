@@ -15,7 +15,7 @@ use crate::{
     Track,
 };
 
-use super::{ProbeResult};
+use super::ProbeResult;
 
 macro_rules! ebml {
     ($io:expr, $size:expr, $( $pat:pat_param => $blk:block ),* ) => {
@@ -309,7 +309,9 @@ struct Audio {
 #[async_trait(?Send)]
 impl Demuxer for MatroskaDemuxer {
     async fn start(&mut self) -> anyhow::Result<Movie> {
-        self.parse_ebml_header().await.context("Parsing EBML header")?;
+        self.parse_ebml_header()
+            .await
+            .context("Parsing EBML header")?;
         self.find_tracks().await.context("Finding tracks")?;
 
         Ok(Movie {
