@@ -18,16 +18,9 @@ async fn main() {
         eprintln!("#{}: {:?}", track.id, track.info);
     }
 
-    // println!("pts,dts,keyframe,stream,length");
     loop {
         let pkt = demuxer.read().await.unwrap();
 
         println!("{:?}", pkt.time);
-        /*if pkt.track.id == subtitle_id {
-            println!(
-                "{}",
-                String::from_utf8(pkt.buffer.to_slice().into_owned()).unwrap()
-            );
-        }*/
     }
 }

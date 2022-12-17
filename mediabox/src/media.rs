@@ -73,11 +73,16 @@ impl fmt::Debug for VideoInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.codec {
             VideoCodec::H264(H264Codec { sps, .. }) => {
-                use h264_reader::{nal::sps::SeqParameterSet, rbsp::decode_nal};
+                use h264_reader::{
+                    nal::sps::SeqParameterSet,
+                    rbsp::{decode_nal, BitReader},
+                };
 
                 let sps_slice = sps.to_slice();
+                let nal = decode_nal(&sps_slice[1..]).unwrap();
 
-                let sps = SeqParameterSet::from_bytes(&decode_nal(&sps_slice[1..])).unwrap();
+                let reader = BitReader::new(nal.as_ref());
+                let sps = SeqParameterSet::from_bits(reader).unwrap();
 
                 let aspect_ratio = sps
                     .vui_parameters
@@ -263,10 +268,16 @@ impl Packet {
                 codec: VideoCodec::H264(H264Codec { sps, .. }),
                 ..
             }) => {
-                use h264_reader::{nal::sps::SeqParameterSet, rbsp::decode_nal};
+                use h264_reader::{
+                    nal::sps::SeqParameterSet,
+                    rbsp::{decode_nal, BitReader},
+                };
 
                 let sps_slice = sps.to_slice();
-                let sps = SeqParameterSet::from_bytes(&decode_nal(&sps_slice[1..])).unwrap();
+                let nal = decode_nal(&sps_slice[1..]).unwrap();
+
+                let reader = BitReader::new(nal.as_ref());
+                let sps = SeqParameterSet::from_bits(reader).unwrap();
 
                 let frame_rate = sps.vui_parameters.as_ref().and_then(|vui| {
                     vui.timing_info

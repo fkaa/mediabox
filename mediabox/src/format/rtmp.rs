@@ -5,13 +5,8 @@ use futures::{
 };
 use h264_reader::{
     annexb::AnnexBReader,
-    nal::{
-        pps::{PicParameterSet, PpsError},
-        sps::{SeqParameterSet, SpsError},
-        NalHandler, NalHeader, NalSwitch, UnitType,
-    },
-    rbsp::decode_nal,
-    Context,
+    nal::{Nal, RefNal, UnitType},
+    push::NalInterest,
 };
 use rml_rtmp::{
     chunk_io::Packet,
@@ -26,7 +21,7 @@ use bytes::{BufMut, BytesMut};
 use log::*;
 use tokio::net::{tcp, TcpListener, TcpStream, ToSocketAddrs};
 
-use std::{cell::RefCell, collections::VecDeque, net::SocketAddr, sync::Arc};
+use std::{collections::VecDeque, io::Read, net::SocketAddr, sync::Arc};
 
 use crate::{codec::nal::BitstreamFraming, media, Fraction, Track};
 
@@ -542,10 +537,10 @@ fn parse_audio_tag(data: &[u8]) -> anyhow::Result<flvparse::AudioTag> {
 }
 
 fn get_codec_from_nalu(packet: &flvparse::AvcVideoPacket) -> anyhow::Result<media::MediaInfo> {
-    let parameter_sets = find_parameter_sets(packet.avc_data);
+    let (sps, pps) = find_parameter_sets(packet.avc_data)
+        .ok_or_else(|| anyhow::anyhow!("Failed to find SPS or PPS"))?;
 
-    dbg!(&parameter_sets);
-    let codec_info = get_video_codec_info(parameter_sets)?;
+    let codec_info = get_video_codec_info(sps, pps)?;
 
     Ok(codec_info)
 }
@@ -574,15 +569,20 @@ fn get_codec_from_mp4(packet: &flvparse::AvcVideoPacket) -> anyhow::Result<media
     let mut sps_bytes = BytesMut::new();
     sps_bytes.put_u8(UnitType::SeqParameterSet.id());
     sps_bytes.extend_from_slice(&sps_bytes_no_header);
-    let sps_bytes = sps_bytes.freeze().into();
+    let sps_bytes = sps_bytes.freeze();
 
     let mut pps_bytes = BytesMut::new();
     pps_bytes.put_u8(UnitType::PicParameterSet.id());
     pps_bytes.extend_from_slice(&pps_bytes_no_header);
     let pps_bytes = pps_bytes.freeze().into();
 
-    let sps = SeqParameterSet::from_bytes(&decode_nal(&sps_bytes_no_header[..]))
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    use h264_reader::{
+        nal::sps::SeqParameterSet,
+        rbsp::{decode_nal, BitReader},
+    };
+    let nal = decode_nal(&sps_bytes_no_header[..]).unwrap();
+    let reader = BitReader::new(nal.as_ref());
+    let sps = SeqParameterSet::from_bits(reader).map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let (width, height) = sps.pixel_dimensions().unwrap();
 
     let codec = media::H264Codec {
@@ -591,7 +591,7 @@ fn get_codec_from_mp4(packet: &flvparse::AvcVideoPacket) -> anyhow::Result<media
         profile_compatibility: avc_record.profile_compatibility().into(),
         level_indication: avc_record.avc_level_indication().level_idc(),
         // FIXME Always uses first set
-        sps: sps_bytes,
+        sps: sps_bytes.into(),
         pps: pps_bytes,
     };
 
@@ -605,42 +605,54 @@ fn get_codec_from_mp4(packet: &flvparse::AvcVideoPacket) -> anyhow::Result<media
     })
 }
 
-fn find_parameter_sets(bytes: &[u8]) -> ParameterSetContext {
-    let mut s = NalSwitch::default();
-    s.put_handler(
-        UnitType::SeqParameterSet,
-        Box::new(RefCell::new(SpsHandler)),
-    );
-    s.put_handler(
-        UnitType::PicParameterSet,
-        Box::new(RefCell::new(PpsHandler)),
-    );
+fn find_parameter_sets(bytes: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut sps = Vec::new();
+    let mut pps = Vec::new();
 
-    let mut ctx = Context::new(ParameterSetContext::default());
+    let reader = AnnexBReader::accumulate(|nal: RefNal<'_>| {
+        let nal_unit_type = nal.header().unwrap().nal_unit_type();
 
-    let mut reader = AnnexBReader::new(s);
-    reader.start(&mut ctx);
-    reader.push(&mut ctx, bytes);
-    reader.end_units(&mut ctx);
+        match nal_unit_type {
+            UnitType::PicParameterSet => {
+                nal.reader().read_to_end(&mut pps).unwrap();
+            }
+            UnitType::SeqParameterSet => {
+                nal.reader().read_to_end(&mut sps).unwrap();
+            }
+            _ => {}
+        }
 
-    ctx.user_context
+        match nal_unit_type {
+            UnitType::PicParameterSet | UnitType::SeqParameterSet => NalInterest::Buffer,
+            _ => NalInterest::Ignore,
+        }
+    });
+
+    if sps.len() == 0 || pps.len() == 0 {
+        return None;
+    }
+
+    Some((sps, pps))
 }
 
-fn get_video_codec_info(parameter_sets: ParameterSetContext) -> anyhow::Result<media::MediaInfo> {
-    let (sps_bytes_no_header, sps) = parameter_sets.sps.unwrap();
-    let (pps_bytes_no_header, _pps) = parameter_sets.pps.unwrap();
-
+fn get_video_codec_info(sps: Vec<u8>, pps: Vec<u8>) -> anyhow::Result<media::MediaInfo> {
     let mut sps_bytes = BytesMut::new();
     sps_bytes.put_u8(UnitType::SeqParameterSet.id());
-    sps_bytes.extend_from_slice(&sps_bytes_no_header);
+    sps_bytes.extend_from_slice(&sps);
     let sps_bytes = sps_bytes.freeze().into();
 
     let mut pps_bytes = BytesMut::new();
     pps_bytes.put_u8(UnitType::PicParameterSet.id());
-    pps_bytes.extend_from_slice(&pps_bytes_no_header);
+    pps_bytes.extend_from_slice(&pps);
     let pps_bytes = pps_bytes.freeze().into();
 
-    let sps = sps.unwrap();
+    use h264_reader::{
+        nal::sps::SeqParameterSet,
+        rbsp::{decode_nal, BitReader},
+    };
+    let nal = decode_nal(&sps[..]).unwrap();
+    let reader = BitReader::new(nal.as_ref());
+    let sps = SeqParameterSet::from_bits(reader).unwrap();
 
     let (width, height) = sps.pixel_dimensions().unwrap();
 
@@ -702,45 +714,4 @@ fn get_audio_codec_info(tag: &flvparse::AudioTag) -> anyhow::Result<media::Media
             codec: media::AudioCodec::Aac(codec),
         }),
     })
-}
-
-#[derive(Debug, Default)]
-pub struct ParameterSetContext {
-    pub sps: Option<(Vec<u8>, Result<SeqParameterSet, SpsError>)>,
-    pub pps: Option<(Vec<u8>, Result<PicParameterSet, PpsError>)>,
-}
-
-pub struct SpsHandler;
-pub struct PpsHandler;
-
-impl NalHandler for SpsHandler {
-    type Ctx = ParameterSetContext;
-
-    fn start(&mut self, _ctx: &mut Context<Self::Ctx>, _header: NalHeader) {}
-
-    fn push(&mut self, ctx: &mut Context<Self::Ctx>, buf: &[u8]) {
-        // error!("handle SPS: {}", base64::encode(&buf[1..]));
-        let sps = SeqParameterSet::from_bytes(&decode_nal(&buf[1..]));
-        if let Ok(sps) = &sps {
-            ctx.put_seq_param_set(sps.clone());
-        }
-    }
-
-    fn end(&mut self, _ctx: &mut Context<Self::Ctx>) {}
-}
-
-impl NalHandler for PpsHandler {
-    type Ctx = ParameterSetContext;
-
-    fn start(&mut self, _ctx: &mut Context<Self::Ctx>, _header: NalHeader) {}
-
-    fn push(&mut self, ctx: &mut Context<Self::Ctx>, buf: &[u8]) {
-        // error!("handle PPS: {}", base64::encode(&buf[1..]));
-        ctx.user_context.pps = Some((
-            buf.to_vec(),
-            PicParameterSet::from_bytes(ctx, &decode_nal(&buf[1..])),
-        ));
-    }
-
-    fn end(&mut self, _ctx: &mut Context<Self::Ctx>) {}
 }

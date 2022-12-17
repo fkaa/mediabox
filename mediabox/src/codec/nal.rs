@@ -1,14 +1,13 @@
 use h264_reader::{
     annexb::AnnexBReader,
     avcc::AvcDecoderConfigurationRecord,
-    nal::{sps::SeqParameterSet, NalHandler, NalHeader, NalSwitch, UnitType},
-    rbsp::decode_nal,
-    Context,
+    nal::{Nal, NalHeader, RefNal, UnitType},
+    push::NalInterest,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
 
-use std::cell::RefCell;
+use std::io::Read;
 
 use crate::{H264Codec, MediaInfo, MediaKind, Span, VideoCodec, VideoInfo};
 
@@ -56,8 +55,6 @@ fn parse_bitstream_length_field<const N: usize, F: Fn([u8; N]) -> usize>(
         let len_bytes = <[u8; N]>::try_from(&len_bytes[..]).unwrap();
         let nal_unit_len = read(len_bytes); // BigEndian::read_u32(&nal_units[i..]) as usize;
 
-        dbg!(len_bytes, nal_unit_len);
-
         i += N;
 
         let nal_unit = bitstream.slice(i..(i + nal_unit_len));
@@ -71,39 +68,26 @@ fn parse_bitstream_length_field<const N: usize, F: Fn([u8; N]) -> usize>(
 
 /// Parses a H.26x bitstream framed in Annex B format (start codes) into NAL units.
 fn parse_bitstream_start_codes(bitstream: Span) -> Vec<Span> {
-    let mut s = NalSwitch::default(); // new(NalFramer::new());
-    s.put_handler(
-        UnitType::SliceLayerWithoutPartitioningNonIdr,
-        Box::new(RefCell::new(GenericNalHandler::with_capacity(1024 * 32))),
-    );
-    s.put_handler(
-        UnitType::SliceLayerWithoutPartitioningIdr,
-        Box::new(RefCell::new(GenericNalHandler::with_capacity(1024 * 512))),
-    );
-    s.put_handler(
-        UnitType::SEI,
-        Box::new(RefCell::new(GenericNalHandler::with_capacity(1024))),
-    );
-    s.put_handler(
-        UnitType::SeqParameterSet,
-        Box::new(RefCell::new(GenericNalHandler::with_capacity(32))),
-    );
-    s.put_handler(
-        UnitType::PicParameterSet,
-        Box::new(RefCell::new(GenericNalHandler::with_capacity(32))),
-    );
+    let mut nal_units = Vec::new();
+    let mut current_nal = Vec::new();
 
-    let framing_context = NalFramerContext::new();
+    let mut acc = AnnexBReader::accumulate(|nal: RefNal| {
+        if nal.is_complete() {
+            let mut complete_nal_unit = Vec::new();
+            nal.reader().read_to_end(&mut current_nal).unwrap();
+            std::mem::swap(&mut current_nal, &mut complete_nal_unit);
+            nal_units.push(complete_nal_unit.into());
+        }
 
-    let mut ctx = Context::new(framing_context);
-    let mut reader = AnnexBReader::new(s);
-    reader.start(&mut ctx);
-    for span in bitstream.spans() {
-        reader.push(&mut ctx, &span);
+        NalInterest::Buffer
+    });
+
+    for slice in bitstream.spans() {
+        acc.push(slice);
     }
-    reader.end_units(&mut ctx);
+    acc.reset();
 
-    ctx.user_context.nal_units.into_iter().collect()
+    nal_units
 }
 
 /// Parses a H.26x bitstream in a given [BitstreamFraming] into NAL units.
@@ -221,8 +205,13 @@ pub fn get_codec_from_mp4(
     pps_bytes.extend_from_slice(&pps_bytes_no_header);
     let pps_bytes = pps_bytes.freeze().into();
 
-    let sps = SeqParameterSet::from_bytes(&decode_nal(&sps_bytes_no_header[..]))
-        .map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    use h264_reader::{
+        nal::sps::SeqParameterSet,
+        rbsp::{decode_nal, BitReader},
+    };
+    let nal = decode_nal(&sps_bytes_no_header[..]).unwrap();
+    let reader = BitReader::new(nal.as_ref());
+    let sps = SeqParameterSet::from_bits(reader).map_err(|e| anyhow::anyhow!("{:?}", e))?;
     let (width, height) = sps.pixel_dimensions().unwrap();
 
     let codec = H264Codec {
@@ -242,83 +231,6 @@ pub fn get_codec_from_mp4(
             codec: VideoCodec::H264(codec),
         }),
     })
-}
-
-struct NalFramerContext {
-    nal_units: Vec<Span>,
-    current_nal_unit: Vec<u8>,
-}
-
-impl NalFramerContext {
-    pub fn new() -> Self {
-        Self {
-            nal_units: Vec::new(),
-            current_nal_unit: Vec::new(),
-        }
-    }
-}
-
-struct GenericNalHandler {
-    capacity: usize,
-    nut: Option<Vec<u8>>,
-}
-
-impl GenericNalHandler {
-    fn with_capacity(size: usize) -> Self {
-        GenericNalHandler {
-            capacity: size,
-            nut: Some(Vec::with_capacity(size)),
-        }
-    }
-}
-
-impl NalHandler for GenericNalHandler {
-    type Ctx = NalFramerContext;
-
-    fn start(&mut self, ctx: &mut Context<Self::Ctx>, header: NalHeader) {
-        let mut nal_unit = Vec::with_capacity(self.capacity);
-        nal_unit.push(header.into());
-        self.nut = Some(nal_unit);
-    }
-
-    fn push(&mut self, ctx: &mut Context<Self::Ctx>, buf: &[u8]) {
-        if let Some(ref mut nut) = &mut self.nut {
-            nut.extend(buf);
-        }
-    }
-
-    fn end(&mut self, ctx: &mut Context<Self::Ctx>) {
-        if let Some(nut) = self.nut.take() {
-            ctx.user_context.nal_units.push(nut.into());
-        }
-    }
-}
-
-struct NalFramer {
-    nal_start: usize,
-}
-
-impl NalFramer {
-    pub fn new() -> Self {
-        Self { nal_start: 0 }
-    }
-}
-
-impl NalHandler for NalFramer {
-    type Ctx = NalFramerContext;
-
-    fn start(&mut self, _ctx: &mut Context<Self::Ctx>, _header: NalHeader) {}
-
-    fn push(&mut self, ctx: &mut Context<Self::Ctx>, buf: &[u8]) {
-        ctx.user_context.current_nal_unit.extend(buf);
-    }
-
-    fn end(&mut self, ctx: &mut Context<Self::Ctx>) {
-        let mut nal_unit = Vec::new();
-
-        std::mem::swap(&mut nal_unit, &mut ctx.user_context.current_nal_unit);
-        ctx.user_context.nal_units.push(nal_unit.into());
-    }
 }
 
 #[cfg(test)]

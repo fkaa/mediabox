@@ -5,6 +5,7 @@ use tokio::fs::File;
 
 use downcast::{downcast, Any};
 use fluent_uri::Uri;
+use anyhow::Context;
 
 use std::{io::SeekFrom, path::Path};
 
@@ -183,7 +184,7 @@ impl Io {
         })
     }
 
-    pub async fn open_file<P: AsRef<Path> + fmt::Debug>(path: P) -> Result<Self, IoError> {
+    pub async fn open_file<P: AsRef<Path> + std::fmt::Debug>(path: P) -> Result<Self, IoError> {
         let uri = uri_from_path(path.as_ref())?;
         let file = File::open(&path)
             .await
@@ -371,12 +372,6 @@ impl Io {
 mod test {
     use super::*;
     use test_case::test_case;
-
-    #[tokio::test]
-    async fn test() {
-        let uri = Uri::parse_from(String::from("../test/foo")).unwrap();
-        panic!("{:?}", uri);
-    }
 
     #[test_case(&[b"abc"], b"abc")]
     #[test_case(&[b"a", b"b", b"c"], b"abc")]
