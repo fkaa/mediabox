@@ -3,9 +3,9 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncSeek, AsyncWrite, BufReader};
 #[cfg(feature = "fs")]
 use tokio::fs::File;
 
+use anyhow::Context;
 use downcast::{downcast, Any};
 use fluent_uri::Uri;
-use anyhow::Context;
 
 use std::{io::SeekFrom, path::Path};
 

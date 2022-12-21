@@ -1,15 +1,9 @@
-use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
-use log::*;
-
-use std::{collections::HashMap, time::Duration};
 
 use crate::{
     codec::nal::{convert_bitstream, frame_nal_units, BitstreamFraming},
-    format::Muxer,
-    io::Io,
-    muxer, AudioCodec, AudioInfo, H264Codec, MediaDuration, MediaKind, MediaTime, Packet, Span,
-    Track, VideoCodec, VideoInfo,
+    AudioCodec, AudioInfo, H264Codec, MediaKind, MediaTime, Packet, Span, Track, VideoCodec,
+    VideoInfo,
 };
 
 // Wonderful macro taken from https://github.com/scottlamb/retina/ examples
@@ -26,10 +20,32 @@ macro_rules! write_box {
             };
             let pos_end = $buf.len();
             let len = pos_end.checked_sub(pos_start).unwrap();
-            $buf[pos_start..pos_start + 4].copy_from_slice(&u32::try_from(len)?.to_be_bytes()[..]);
+            $buf[pos_start..pos_start + 4].copy_from_slice(&(len as u32).to_be_bytes()[..]);
             r
         }
     };
+}
+
+mod fmp4;
+mod mp4;
+
+pub use fmp4::*;
+pub use mp4::*;
+
+fn get_packet_sample_data(packet: &Packet) -> Span {
+    match packet.track.info.kind {
+        MediaKind::Video(VideoInfo {
+            codec: VideoCodec::H264(H264Codec {
+                bitstream_format, ..
+            }),
+            ..
+        }) => convert_bitstream(
+            packet.buffer.clone(),
+            bitstream_format,
+            BitstreamFraming::FourByteLength,
+        ),
+        _ => packet.buffer.clone(),
+    }
 }
 
 fn type_check<R, T: FnOnce(&mut bytes::BytesMut) -> R>(f: T) -> T {
@@ -53,456 +69,87 @@ macro_rules! write_base_descriptor {
     };
 }
 
-muxer!("fmp4", FragmentedMp4Muxer::create);
-
-pub struct FragmentedMp4Muxer {
-    video: Option<Track>,
-    audio: Option<Track>,
-    start_times: HashMap<u32, MediaTime>,
-    prev_times: HashMap<u32, MediaTime>,
-    track_mapping: HashMap<u32, u32>,
-    io: Io,
-    seq: u64,
+fn write_mvhd(buf: &mut BytesMut) {
+    write_box!(buf, b"mvhd", {
+        buf.put_u32(1 << 24); // version
+        buf.put_u64(0); // creation_time
+        buf.put_u64(0); // modification_time
+        buf.put_u32(1_000); // timescale
+        buf.put_u64(0);
+        buf.put_u32(0x00010000); // rate
+        buf.put_u16(0x0100); // volume
+        buf.put_u16(0); // reserved
+        buf.put_u64(0); // reserved
+        for v in &[0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000] {
+            buf.put_u32(*v); // matrix
+        }
+        for _ in 0..6 {
+            buf.put_u32(0); // pre_defined
+        }
+        buf.put_u32(u32::MAX); // next_track_id
+    });
 }
 
-impl FragmentedMp4Muxer {
-    pub fn with_streams(streams: &[Track]) -> Self {
-        let mut muxer = FragmentedMp4Muxer {
-            video: None,
-            audio: None,
-            start_times: HashMap::new(),
-            prev_times: HashMap::new(),
-            track_mapping: HashMap::new(),
-            io: Io::null(),
-            seq: 0,
-        };
+#[derive(Clone)]
+struct TrackBuilder {
+    track: Track,
+    id: u32,
+    sample_entries: Vec<SampleEntry>,
+}
 
-        muxer.assign_streams(streams);
-
-        muxer
-    }
-
-    pub fn new(io: Io) -> Self {
-        FragmentedMp4Muxer {
-            video: None,
-            audio: None,
-            start_times: HashMap::new(),
-            prev_times: HashMap::new(),
-            track_mapping: HashMap::new(),
-            io,
-            seq: 0,
+impl TrackBuilder {
+    fn new(track: Track, id: u32) -> Self {
+        TrackBuilder {
+            track,
+            id,
+            sample_entries: Vec::new(),
         }
     }
 
-    fn create(io: Io) -> Box<dyn Muxer> {
-        Box::new(Self::new(io))
-    }
-
-    pub fn initialization_segment(&self) -> anyhow::Result<Span> {
-        let mut buf = BytesMut::new();
-
-        write_box!(&mut buf, b"ftyp", {
-            buf.extend_from_slice(b"isom\0\0\0\0isomiso5dash");
-        });
-
-        write_box!(&mut buf, b"moov", {
-            write_box!(&mut buf, b"mvhd", {
-                buf.put_u32(1 << 24); // version
-                buf.put_u64(0); // creation_time
-                buf.put_u64(0); // modification_time
-                buf.put_u32(1_000); // timescale
-                buf.put_u64(0);
-                buf.put_u32(0x00010000); // rate
-                buf.put_u16(0x0100); // volume
-                buf.put_u16(0); // reserved
-                buf.put_u64(0); // reserved
-                for v in &[0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000] {
-                    buf.put_u32(*v); // matrix
-                }
-                for _ in 0..6 {
-                    buf.put_u32(0); // pre_defined
-                }
-                buf.put_u32(2); // next_track_id
-            });
-            write_box!(&mut buf, b"mvex", {
-                write_box!(&mut buf, b"mehd", {
-                    buf.put_u32(1 << 24); // version
-                    buf.put_u64(0); // duration
-                });
-                if let Some(video) = &self.video {
-                    write_box!(&mut buf, b"trex", {
-                        buf.put_u32(0 << 24); // version
-                        buf.put_u32(self.track_mapping[&video.id]); // track_id
-                        buf.put_u32(1); // sample_description
-                        buf.put_u32(0); // default_duration,
-                        buf.put_u32(0); // default_size,
-                        buf.put_u32(0); // default_flags,
-                    });
-                }
-                if let Some(audio) = &self.audio {
-                    write_box!(&mut buf, b"trex", {
-                        buf.put_u32(0 << 24); // version
-                        buf.put_u32(self.track_mapping[&audio.id]); // track_id
-                        buf.put_u32(1); // sample_description
-                        buf.put_u32(0); // default_duration,
-                        buf.put_u32(0); // default_size,
-                        buf.put_u32(0); // default_flags,
-                    });
-                }
-            });
-
-            if let Some(video) = &self.video {
-                write_video_trak(&mut buf, video)?;
-            }
-            if let Some(audio) = &self.audio {
-                write_audio_trak(&mut buf, audio, self.track_mapping[&audio.id])?;
-            }
-        });
-
-        Ok(buf.freeze().into())
-    }
-
-    pub fn write_media_segment(&mut self, packet: Packet) -> anyhow::Result<Span> {
-        let prev_time = self
-            .prev_times
-            .entry(packet.track.id)
-            .or_insert_with(|| packet.time.clone());
-        let start_time = self
-            .start_times
-            .entry(packet.track.id)
-            .or_insert_with(|| packet.time.clone());
-
-        let media_duration = packet.time.clone() - prev_time.clone();
-        let base_offset = prev_time.clone() - start_time.clone();
-
-        let track_id = self.track_mapping[&packet.track.id];
-
-        let duration = if media_duration.duration == 0 {
-            packet.guess_duration().unwrap_or_else(|| {
-                MediaDuration::from_duration(Duration::from_millis(16), packet.track.timebase)
-            })
-        } else {
-            media_duration
-        };
-
-        // let duration = duration.in_base(Fraction::new(1, 90_000));
-
-        let duration = duration.duration;
-
-        let mut buf = BytesMut::new();
-        let data_offset_pos;
-
-        write_box!(&mut buf, b"moof", {
-            write_box!(&mut buf, b"mfhd", {
-                buf.put_u32(0 << 24); // version
-                buf.put_u64(self.seq); // creation_time
-            });
-
-            write_box!(&mut buf, b"traf", {
-                write_box!(&mut buf, b"tfhd", {
-                    let flags = 0x0200_00; // base_is_moof
-                    buf.put_u32(flags); // version, flags
-                    buf.put_u32(track_id); // track_id
-                });
-                write_box!(&mut buf, b"trun", {
-                    let flags = 0x0000_01 | // offset_present
-                        0x0000_04 | // first_flags_present
-                        0x0001_00 | // duration_present
-                        0x0002_00; // size_present
-                    buf.put_u32(flags); // version, flags
-                    buf.put_u32(1); // sample_len
-
-                    data_offset_pos = buf.len();
-                    buf.put_u32(0); // data_offset
-                    buf.put_u32(if packet.key { 0x10000 } else { 0 }); // first_sample_flags
-                    buf.put_u32(duration as u32);
-                    buf.put_u32(packet.buffer.len() as _);
-                });
-                write_box!(&mut buf, b"tfdt", {
-                    buf.put_u32(1 << 24); // version
-                    buf.put_u64(base_offset.duration as u64); // decode_time
-                });
-            });
-        });
-
-        let len = (buf.len() as u32 + 8).to_be_bytes();
-        buf[data_offset_pos..(data_offset_pos + 4)].copy_from_slice(&len);
-
-        let moof = buf.freeze();
-
-        let mut mdat_header = BytesMut::new();
-        mdat_header.put_u32(packet.buffer.len() as u32 + 8);
-        mdat_header.extend_from_slice(b"mdat");
-        let mdat_header = mdat_header.freeze();
-
-        let sample_data = match packet.track.info.kind {
-            MediaKind::Video(VideoInfo {
-                codec:
-                    VideoCodec::H264(H264Codec {
-                        bitstream_format, ..
-                    }),
-                ..
-            }) => convert_bitstream(
-                packet.buffer.clone(),
-                bitstream_format,
-                BitstreamFraming::FourByteLength,
-            ),
-            _ => packet.buffer.clone(),
-        };
-
-        let segment = [moof.into(), mdat_header.into(), sample_data]
-            .into_iter()
-            .collect::<Span>();
-
-        self.seq += 1;
-        self.prev_times.insert(packet.track.id, packet.time);
-
-        Ok(segment)
-    }
-
-    fn get_packet_time(&mut self, packet: &Packet) -> (MediaDuration, MediaDuration) {
-        let prev_time = self
-            .prev_times
-            .entry(packet.track.id)
-            .or_insert_with(|| packet.time.clone());
-        let start_time = self
-            .start_times
-            .entry(packet.track.id)
-            .or_insert_with(|| packet.time.clone());
-
-        let media_duration = packet.time.clone() - prev_time.clone();
-        let base_offset = prev_time.clone() - start_time.clone();
-
-        let duration = if media_duration.duration == 0 {
-            packet.guess_duration().unwrap_or_else(|| {
-                MediaDuration::from_duration(Duration::from_millis(16), packet.track.timebase)
-            })
-        } else {
-            media_duration
-        };
-
-        self.prev_times.insert(packet.track.id, packet.time.clone());
-
-        (base_offset, duration)
-    }
-
-    pub fn write_many_media_segments(&mut self, packets: &[Packet]) -> anyhow::Result<Span> {
-        // TODO: audio?
-        let track_id = self.track_mapping[&packets[0].track.id];
-
-        let mut buf = BytesMut::new();
-        let data_offset_pos;
-
-        write_box!(&mut buf, b"moof", {
-            write_box!(&mut buf, b"mfhd", {
-                buf.put_u32(0 << 24); // version
-                buf.put_u32(self.seq as u32); // sequence_id
-            });
-
-            write_box!(&mut buf, b"traf", {
-                write_box!(&mut buf, b"tfhd", {
-                    let flags = 0x0200_00; // base_is_moof
-                    buf.put_u32(flags); // version, flags
-                    buf.put_u32(track_id); // track_id
-                });
-                write_box!(&mut buf, b"trun", {
-                    let flags = 0x0000_01 | // offset_present
-                        0x0001_00 | // duration_present
-                        0x0002_00 | // size_present
-                        0x0004_00; // sample_flags_prsent
-                    buf.put_u32(flags); // version, flags
-                    buf.put_u32(packets.len() as u32); // sample_len
-
-                    data_offset_pos = buf.len();
-                    buf.put_u32(0); // data_offset
-                    for pkt in packets {
-                        let (_base_offset, duration) = self.get_packet_time(&pkt);
-                        let track_id = self.track_mapping[&pkt.track.id];
-                        let duration = duration.duration;
-
-                        buf.put_u32(duration as u32);
-                        buf.put_u32(pkt.buffer.len() as _);
-                        buf.put_u32(if pkt.key { 0x10000 } else { 0 }); // first_sample_flags
-                    }
-                });
-                write_box!(&mut buf, b"tfdt", {
-                    buf.put_u32(1 << 24); // version
-                    buf.put_u64(0); // decode_time
-                });
-            });
-        });
-
-        let len = (buf.len() as u32 + 8).to_be_bytes();
-        buf[data_offset_pos..(data_offset_pos + 4)].copy_from_slice(&len);
-
-        let moof = buf.freeze();
-
-        let mut mdat_header = BytesMut::new();
-        mdat_header.put_u32(packets.iter().map(|p| p.buffer.len()).sum::<usize>() as u32 + 8);
-        mdat_header.extend_from_slice(b"mdat");
-        let mdat_header = mdat_header.freeze();
-
-        let sample_data = packets.iter().map(|packet| match packet.track.info.kind {
-            MediaKind::Video(VideoInfo {
-                codec:
-                    VideoCodec::H264(H264Codec {
-                        bitstream_format, ..
-                    }),
-                ..
-            }) => convert_bitstream(
-                packet.buffer.clone(),
-                bitstream_format,
-                BitstreamFraming::FourByteLength,
-            ),
-            _ => packet.buffer.clone(),
-        });
-
-        let segment = [moof.into(), mdat_header.into()]
-            .into_iter()
-            .chain(sample_data)
-            .collect::<Span>();
-
-        Ok(segment)
-    }
-
-    fn assign_streams(&mut self, streams: &[Track]) {
-        use crate::media::MediaTrackExt;
-
-        let mut track_number = 1;
-        if let Some(video) = streams.video() {
-            self.track_mapping.insert(video.id, track_number);
-            track_number += 1;
-
-            self.video = Some(video.clone());
-        }
-
-        if let Some(audio) = streams.audio() {
-            self.track_mapping.insert(audio.id, track_number);
-
-            self.audio = Some(audio.clone());
-        }
-
-        debug!("Track mappings: {:?}", self.track_mapping);
+    fn add_sample(&mut self, entry: SampleEntry) {
+        self.sample_entries.push(entry);
     }
 }
 
-#[async_trait]
-impl Muxer for FragmentedMp4Muxer {
-    async fn start(&mut self, streams: Vec<Track>) -> anyhow::Result<()> {
-        self.assign_streams(&streams);
-        let init_segment = self.initialization_segment()?;
-
-        self.io.write_span(init_segment).await?;
-
-        Ok(())
-    }
-
-    async fn write(&mut self, packet: Packet) -> anyhow::Result<()> {
-        if !self.track_mapping.contains_key(&packet.track.id) {
-            return Ok(());
-        }
-
-        let media_segment = self.write_media_segment(packet)?;
-
-        self.io.write_span(media_segment).await?;
-
-        Ok(())
-    }
-
-    async fn stop(&mut self) -> anyhow::Result<()> {
-        Ok(())
-    }
+#[derive(Clone)]
+struct SampleEntry {
+    is_sync: bool,
+    size: u64,
+    time: MediaTime,
 }
 
-fn write_audio_trak(buf: &mut BytesMut, stream: &Track, track_id: u32) -> anyhow::Result<()> {
-    let info = stream
-        .info
-        .audio()
-        .expect("Audio stream should contain audio info");
+fn write_trak(buf: &mut BytesMut, builder: TrackBuilder) -> anyhow::Result<()> {
+    let stream = builder.track;
+    let track_id = builder.id;
+
     let timebase = stream.timebase.simplify().denominator;
 
     write_box!(buf, b"trak", {
-        write_box!(buf, b"tkhd", {
-            buf.put_u32((1 << 24) | 7); // version, flags
-            buf.put_u64(0); // creation_time
-            buf.put_u64(0); // modification_time
-            buf.put_u32(track_id); // track_id
-            buf.put_u32(0); // reserved
-            buf.put_u64(0); // duration
-            buf.put_u64(0); // reserved
-            buf.put_u16(0); // layer
-            buf.put_u16(0); // alternate_group
-            buf.put_u16(0); // volume
-            buf.put_u16(0); // reserved
-            for v in &[0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000] {
-                buf.put_u32(*v); // matrix
-            }
-            buf.put_u32(0);
-            buf.put_u32(0);
-        });
-        write_box!(buf, b"mdia", {
-            write_box!(buf, b"mdhd", {
-                buf.put_u32(1 << 24); // version
-                buf.put_u64(0); // creation_time
-                buf.put_u64(0); // modification_time
-                buf.put_u32(timebase); // timebase
-                buf.put_u64(0);
-                buf.put_u32(0x55c40000); // language=und + pre-defined
-            });
-            write_box!(buf, b"hdlr", {
-                buf.extend_from_slice(&[
-                    0x00, 0x00, 0x00, 0x00, // version + flags
-                    0x00, 0x00, 0x00, 0x00, // pre_defined
-                    b's', b'o', b'u', b'n', // handler = vide
-                    0x00, 0x00, 0x00, 0x00, // reserved[0]
-                    0x00, 0x00, 0x00, 0x00, // reserved[1]
-                    0x00, 0x00, 0x00, 0x00, // reserved[2]
-                    0x00, // name, zero-terminated (empty)
-                ]);
-            });
-            write_box!(buf, b"minf", {
-                write_box!(buf, b"soun", {
-                    buf.put_u32(1);
-                    buf.put_u64(0);
-                });
-                write_box!(buf, b"dinf", {
-                    write_box!(buf, b"dref", {
-                        buf.put_u32(0);
-                        buf.put_u32(1); // entry_count
-                        write_box!(buf, b"url ", {
-                            buf.put_u32(1); // version, flags=self-contained
-                        });
-                    });
-                });
-                write_box!(buf, b"stbl", {
-                    write_box!(buf, b"stsd", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(1); // entry_count
+        write_tkhd(buf, track_id, 0, 0);
 
-                        write_audio_sample_description(buf, info)?;
-                    });
-                    write_box!(buf, b"stss", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stts", {
-                        buf.put_u32(0);
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stsc", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stsz", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // sample_size
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stco", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // len
-                    });
-                });
+        write_box!(buf, b"mdia", {
+            write_mdhd(buf, timebase);
+            write_hdlr(buf);
+
+            write_box!(buf, b"minf", {
+                match stream.info.kind {
+                    MediaKind::Video(_) => {
+                        write_box!(buf, b"vmhd", {
+                            buf.put_u32(1);
+                            buf.put_u64(0);
+                        });
+                    }
+                    MediaKind::Audio(_) => {
+                        write_box!(buf, b"soun", {
+                            buf.put_u32(1);
+                            buf.put_u64(0);
+                        });
+                    }
+                    _ => todo!(),
+                }
+                write_dinf(buf);
+
+                write_stbl(buf, stream, &builder.sample_entries)?;
             });
         });
     });
@@ -510,7 +157,10 @@ fn write_audio_trak(buf: &mut BytesMut, stream: &Track, track_id: u32) -> anyhow
     Ok(())
 }
 
-fn write_video_trak(buf: &mut BytesMut, stream: &Track) -> anyhow::Result<()> {
+fn write_video_trak(buf: &mut BytesMut, builder: TrackBuilder) -> anyhow::Result<()> {
+    let stream = builder.track;
+    let track_id = builder.id;
+
     let info = stream
         .info
         .video()
@@ -518,94 +168,251 @@ fn write_video_trak(buf: &mut BytesMut, stream: &Track) -> anyhow::Result<()> {
     let timebase = stream.timebase.simplify().denominator;
 
     write_box!(buf, b"trak", {
-        write_box!(buf, b"tkhd", {
-            buf.put_u32((1 << 24) | 7); // version, flags
-            buf.put_u64(0); // creation_time
-            buf.put_u64(0); // modification_time
-            buf.put_u32(1); // track_id
-            buf.put_u32(0); // reserved
-            buf.put_u64(0); // duration
-            buf.put_u64(0); // reserved
-            buf.put_u16(0); // layer
-            buf.put_u16(0); // alternate_group
-            buf.put_u16(0); // volume
-            buf.put_u16(0); // reserved
-            for v in &[0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000] {
-                buf.put_u32(*v); // matrix
-            }
-            let width = u32::from(u16::try_from(info.width)?) << 16;
-            let height = u32::from(u16::try_from(info.height)?) << 16;
-            buf.put_u32(width);
-            buf.put_u32(height);
-        });
+        let width = u32::from(u16::try_from(info.width)?) << 16;
+        let height = u32::from(u16::try_from(info.height)?) << 16;
+
+        write_tkhd(buf, track_id, width, height);
+
         write_box!(buf, b"mdia", {
-            write_box!(buf, b"mdhd", {
-                buf.put_u32(1 << 24); // version
-                buf.put_u64(0); // creation_time
-                buf.put_u64(0); // modification_time
-                buf.put_u32(timebase); // timebase
-                buf.put_u64(0);
-                buf.put_u32(0x55c40000); // language=und + pre-defined
-            });
-            write_box!(buf, b"hdlr", {
-                buf.extend_from_slice(&[
-                    0x00, 0x00, 0x00, 0x00, // version + flags
-                    0x00, 0x00, 0x00, 0x00, // pre_defined
-                    b'v', b'i', b'd', b'e', // handler = vide
-                    0x00, 0x00, 0x00, 0x00, // reserved[0]
-                    0x00, 0x00, 0x00, 0x00, // reserved[1]
-                    0x00, 0x00, 0x00, 0x00, // reserved[2]
-                    0x00, // name, zero-terminated (empty)
-                ]);
-            });
+            write_mdhd(buf, timebase);
+            write_hdlr(buf);
+
             write_box!(buf, b"minf", {
                 write_box!(buf, b"vmhd", {
                     buf.put_u32(1);
                     buf.put_u64(0);
                 });
-                write_box!(buf, b"dinf", {
-                    write_box!(buf, b"dref", {
-                        buf.put_u32(0);
-                        buf.put_u32(1); // entry_count
-                        write_box!(buf, b"url ", {
-                            buf.put_u32(1); // version, flags=self-contained
-                        });
-                    });
-                });
-                write_box!(buf, b"stbl", {
-                    write_box!(buf, b"stsd", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(1); // entry_count
+                write_dinf(buf);
 
-                        write_video_sample_entry(buf, info)?;
-                    });
-                    write_box!(buf, b"stss", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stts", {
-                        buf.put_u32(0);
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stsc", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stsz", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // sample_size
-                        buf.put_u32(0); // len
-                    });
-                    write_box!(buf, b"stco", {
-                        buf.put_u32(0); // version
-                        buf.put_u32(0); // len
-                    });
-                });
+                write_video_stbl(buf, info, &builder.sample_entries)?;
             });
         });
     });
 
     Ok(())
+}
+
+fn write_audio_trak(buf: &mut BytesMut, builder: TrackBuilder) -> anyhow::Result<()> {
+    let stream = builder.track;
+    let track_id = builder.id;
+
+    let info = stream
+        .info
+        .audio()
+        .expect("Audio stream should contain audio info");
+    let timebase = stream.timebase.simplify().denominator;
+
+    write_box!(buf, b"trak", {
+        write_tkhd(buf, track_id, 0, 0);
+
+        write_box!(buf, b"mdia", {
+            write_mdhd(buf, timebase);
+            write_hdlr(buf);
+
+            write_box!(buf, b"minf", {
+                write_box!(buf, b"soun", {
+                    buf.put_u32(1);
+                    buf.put_u64(0);
+                });
+                write_dinf(buf);
+
+                write_audio_stbl(buf, info)?;
+            });
+        });
+    });
+
+    Ok(())
+}
+
+fn write_stsd(buf: &mut BytesMut, track: Track) -> anyhow::Result<()> {
+    write_box!(buf, b"stsd", {
+        buf.put_u32(0); // version
+        buf.put_u32(1); // entry_count
+
+        match &track.info.kind {
+            MediaKind::Video(info) => write_video_sample_entry(buf, info)?,
+            MediaKind::Audio(info) => write_audio_sample_description(buf, info)?,
+            _ => todo!(),
+        }
+    });
+
+    Ok(())
+}
+
+fn write_stss(buf: &mut BytesMut, entries: &[SampleEntry]) {
+    let sync_samples = entries
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, entry)| {
+            if entry.is_sync {
+                Some(idx as u32 + 1)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+
+    write_box!(buf, b"stss", {
+        buf.put_u32(0); // version
+        buf.put_u32(sync_samples.len() as u32); // len
+
+        for idx in sync_samples {
+            buf.put_u32(idx); // sample_number
+        }
+    });
+}
+
+fn write_stbl(buf: &mut BytesMut, track: Track, entries: &[SampleEntry]) -> anyhow::Result<()> {
+    write_box!(buf, b"stbl", {
+        write_stsd(buf, track)?;
+        write_stss(buf, entries);
+
+        write_box!(buf, b"stsc", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stsz", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // sample_size
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stco", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+    });
+
+    Ok(())
+}
+
+fn write_video_stbl(
+    buf: &mut BytesMut,
+    info: &VideoInfo,
+    entries: &[SampleEntry],
+) -> anyhow::Result<()> {
+    write_box!(buf, b"stbl", {
+        write_box!(buf, b"stsd", {
+            buf.put_u32(0); // version
+            buf.put_u32(1); // entry_count
+
+            write_video_sample_entry(buf, info)?;
+        });
+        write_box!(buf, b"stss", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stts", {
+            buf.put_u32(0);
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stsc", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stsz", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // sample_size
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stco", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+    });
+
+    Ok(())
+}
+
+fn write_audio_stbl(buf: &mut BytesMut, info: &AudioInfo) -> anyhow::Result<()> {
+    write_box!(buf, b"stbl", {
+        write_box!(buf, b"stsd", {
+            buf.put_u32(0); // version
+            buf.put_u32(1); // entry_count
+
+            write_audio_sample_description(buf, info)?;
+        });
+        write_box!(buf, b"stss", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stts", {
+            buf.put_u32(0);
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stsc", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stsz", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // sample_size
+            buf.put_u32(0); // len
+        });
+        write_box!(buf, b"stco", {
+            buf.put_u32(0); // version
+            buf.put_u32(0); // len
+        });
+    });
+
+    Ok(())
+}
+
+fn write_tkhd(buf: &mut BytesMut, track_id: u32, width: u32, height: u32) {
+    write_box!(buf, b"tkhd", {
+        buf.put_u32((1 << 24) | 7); // version, flags
+        buf.put_u64(0); // creation_time
+        buf.put_u64(0); // modification_time
+        buf.put_u32(track_id); // track_id
+        buf.put_u32(0); // reserved
+        buf.put_u64(0); // duration
+        buf.put_u64(0); // reserved
+        buf.put_u16(0); // layer
+        buf.put_u16(0); // alternate_group
+        buf.put_u16(0); // volume
+        buf.put_u16(0); // reserved
+        for v in &[0x00010000, 0, 0, 0, 0x00010000, 0, 0, 0, 0x40000000] {
+            buf.put_u32(*v); // matrix
+        }
+        buf.put_u32(width);
+        buf.put_u32(height);
+    });
+}
+
+fn write_mdhd(buf: &mut BytesMut, timebase: u32) {
+    write_box!(buf, b"mdhd", {
+        buf.put_u32(1 << 24); // version
+        buf.put_u64(0); // creation_time
+        buf.put_u64(0); // modification_time
+        buf.put_u32(timebase); // timebase
+        buf.put_u64(0);
+        buf.put_u32(0x55c40000); // language=und + pre-defined
+    });
+}
+
+fn write_hdlr(buf: &mut BytesMut) {
+    write_box!(buf, b"hdlr", {
+        buf.extend_from_slice(&[
+            0x00, 0x00, 0x00, 0x00, // version + flags
+            0x00, 0x00, 0x00, 0x00, // pre_defined
+            b's', b'o', b'u', b'n', // handler = vide
+            0x00, 0x00, 0x00, 0x00, // reserved[0]
+            0x00, 0x00, 0x00, 0x00, // reserved[1]
+            0x00, 0x00, 0x00, 0x00, // reserved[2]
+            0x00, // name, zero-terminated (empty)
+        ]);
+    });
+}
+
+fn write_dinf(buf: &mut BytesMut) {
+    write_box!(buf, b"dinf", {
+        write_box!(buf, b"dref", {
+            buf.put_u32(0);
+            buf.put_u32(1); // entry_count
+            write_box!(buf, b"url ", {
+                buf.put_u32(1); // version, flags=self-contained
+            });
+        });
+    });
 }
 
 fn write_audio_sample_description(buf: &mut BytesMut, info: &AudioInfo) -> anyhow::Result<()> {
