@@ -115,6 +115,10 @@ impl Muxer for Mp4Muxer {
         self.write_moov_box().await?;
         Ok(())
     }
+    
+    fn into_io(self) -> Io {
+        self.io
+    }
 }
 
 struct DecodeTimeBuffer {

@@ -8,6 +8,9 @@ use codec::{
 };
 use std::{collections::HashMap, fmt};
 
+#[cfg(test)]
+mod test;
+
 pub mod media;
 pub mod span;
 

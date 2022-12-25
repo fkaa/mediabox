@@ -362,4 +362,8 @@ impl Muxer for FragmentedMp4Muxer {
     async fn stop(&mut self) -> anyhow::Result<()> {
         Ok(())
     }
+    
+    fn into_io(self) -> Io {
+        self.io
+    }
 }

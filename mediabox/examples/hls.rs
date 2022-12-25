@@ -1,12 +1,14 @@
-use mediabox::format::hls::*;
-use mediabox::format::mkv::*;
 use mediabox::format::*;
 use mediabox::io::*;
 
 use tokio::fs::File;
 
+#[cfg(feature = "hls")]
 #[tokio::main]
 async fn main() {
+    use mediabox::format::hls::*;
+    use mediabox::format::mkv::*;
+
     env_logger::init();
 
     let file = File::open("test.mkv").await.unwrap();
@@ -35,3 +37,6 @@ async fn main() {
         }*/
     }
 }
+
+#[cfg(not(feature = "hls"))]
+fn main() {}

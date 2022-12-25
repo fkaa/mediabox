@@ -73,6 +73,8 @@ pub trait Muxer: Send {
     /// Stops the muxer. This will flush any buffered packets and finalize the output if
     /// appropriate.
     async fn stop(&mut self) -> anyhow::Result<()>;
+
+    fn into_io(self) -> Io;
 }
 
 #[derive(Clone)]

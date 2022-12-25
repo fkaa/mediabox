@@ -741,6 +741,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73cbba799671b762df5a175adf59ce145165747bb891505c43d09aefbbf38beb"
 
 [[package]]
+name = "mbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "h264-reader",
+ "mediabox",
+ "tokio",
+ "xflags",
+]
+
+[[package]]
 name = "mediabox"
 version = "0.1.0"
 dependencies = [
@@ -770,17 +781,6 @@ dependencies = [
  "wasm-bindgen",
  "wasm-streams",
  "web-sys",
-]
-
-[[package]]
-name = "mediaprobe"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "h264-reader",
- "mediabox",
- "tokio",
- "xflags",
 ]
 
 [[package]]
@@ -1284,9 +1284,9 @@ dependencies = [
 
 [[package]]
 name = "test-case"
-version = "2.2.1"
+version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "07aea929e9488998b64adc414c29fe5620398f01c2e3f58164122b17e567a6d5"
+checksum = "21d6cf5a7dffb3f9dceec8e6b8ca528d9bd71d36c9f074defb548ce161f598c0"
 dependencies = [
  "test-case-macros",
 ]
