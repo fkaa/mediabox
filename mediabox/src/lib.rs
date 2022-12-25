@@ -21,6 +21,7 @@ pub use span::Span;
 use format::{DemuxerMetadata, MuxerMetadata, ProbeResult};
 use io::Io;
 
+#[derive(Default)]
 pub struct MediaContext {
     decoder_meta: HashMap<String, DecoderMetadata>,
     encoder_meta: HashMap<String, EncoderMetadata>,

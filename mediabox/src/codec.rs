@@ -3,6 +3,7 @@ use std::{collections::HashMap, fmt};
 use crate::{MediaInfo, MediaTime, Packet, Track};
 
 pub mod ass;
+pub mod h264;
 pub mod nal;
 pub mod webvtt;
 
