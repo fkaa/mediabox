@@ -1,6 +1,8 @@
+mod ebml;
 mod demux;
 mod mux;
 
+use ebml::*;
 pub use demux::*;
 pub use mux::*;
 
@@ -35,6 +37,40 @@ const SIMPLE_BLOCK: u32 = 0xa3;
 const BLOCK_GROUP: u32 = 0xa0;
 const BLOCK: u32 = 0xa1;
 const BLOCK_DURATION: u32 = 0x9b;
+
+#[derive(thiserror::Error, Debug)]
+pub enum MkvError {
+    #[error("Not enough data")]
+    NotEnoughData,
+
+    #[error("Unsupported variable integer size: {0}")]
+    UnsupportedVint(u64),
+
+    #[error("Unsupported variable integer ID: {0}")]
+    UnsupportedVid(u8),
+
+    #[error("Invalid float size: {0}")]
+    InvalidFloatSize(u64),
+
+    #[error("Expected 0x{0:08x} but found 0x{1:08x}")]
+    UnexpectedId(u32, u32),
+
+    #[error("No element 0x{0:08x} was found")]
+    MissingElement(u32),
+
+    #[error("Invalid UTF-8: {0}")]
+    Utf8Error(#[from] std::string::FromUtf8Error),
+
+    #[error("{0}")]
+    Io(#[from] crate::io::IoError),
+
+    #[error("{0}")]
+    StdIo(#[from] std::io::Error),
+
+    // lazy
+    #[error("{0}")]
+    Misc(#[from] anyhow::Error),
+}
 
 
 #[cfg(test)]
