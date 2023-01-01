@@ -1,10 +1,10 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 
 use std::borrow::Cow;
 use std::io::IoSlice;
 use std::ops::{Range, RangeBounds};
 
-pub struct SpanIterator<'a>(&'a Span, usize);
+/*pub struct SpanIterator<'a>(&'a Span, usize);
 
 impl<'a> Iterator for SpanIterator<'a> {
     type Item = &'a [u8];
@@ -20,29 +20,25 @@ impl<'a> Iterator for SpanIterator<'a> {
 
         bytes
     }
-}
+}*/
 
 /// A byte rope-like structure for efficiently appending and slicing byte sequences.
 #[derive(Debug, Clone)]
 pub enum Span {
-    Many(Vec<Bytes>),
+    Many(Vec<Span>),
     Single(Bytes),
     Static(&'static [u8]),
 }
 
 impl FromIterator<Span> for Span {
     fn from_iter<I: IntoIterator<Item = Span>>(iter: I) -> Self {
-        let mut new_spans = Vec::new();
+        Span::Many(iter.into_iter().collect())
+    }
+}
 
-        for span in iter {
-            match span {
-                Span::Many(spans) => new_spans.extend(spans.into_iter()),
-                Span::Single(span) => new_spans.push(span.clone()),
-                Span::Static(span) => new_spans.push(Bytes::from_static(span)),
-            }
-        }
-
-        Span::Many(new_spans)
+impl From<()> for Span {
+    fn from(_: ()) -> Self {
+        Span::Static(&[])
     }
 }
 
@@ -136,34 +132,51 @@ impl Span {
         }
     }
 
-    /// Returns an iterator over all the internal byte slices.
-    pub fn spans<'a>(&'a self) -> SpanIterator<'a> {
-        SpanIterator(self, 0)
+    pub fn visit<'a, F: FnMut(&'a [u8])>(&'a self, func: &mut F) {
+        match self {
+            Span::Many(spans) => {
+                for span in spans {
+                    span.visit(func);
+                }
+            }
+            Span::Single(span) => func(&span[..]),
+            Span::Static(span) => func(&span[..]),
+        }
+    }
+
+    pub fn visit_bytes<'a, F: FnMut(Bytes)>(&'a self, func: &mut F) {
+        match self {
+            Span::Many(spans) => {
+                for span in spans {
+                    span.visit_bytes(func);
+                }
+            }
+            Span::Single(span) => func(span.clone()),
+            Span::Static(span) => func(Bytes::from_static(span)),
+        }
     }
 
     pub fn to_io_slice<'a>(&'a self) -> Vec<IoSlice<'a>> {
-        match self {
-            Span::Many(spans) => spans.iter().map(|s| IoSlice::new(s)).collect::<Vec<_>>(),
-            Span::Single(span) => vec![IoSlice::new(span)],
-            Span::Static(span) => vec![IoSlice::new(span)],
-        }
+        let mut slices = Vec::new();
+        self.visit(&mut |b| slices.push(IoSlice::new(b)));
+        slices
     }
 
     pub fn to_byte_spans(&self) -> Vec<Bytes> {
-        match self {
-            Span::Many(spans) => spans.clone(),
-            Span::Single(span) => vec![span.clone()],
-            &Span::Static(span) => vec![span.into()],
-        }
+        let mut bytes = Vec::new();
+
+        self.visit_bytes(&mut |b| bytes.push(b));
+
+        bytes
     }
     /// Converts the span into a [Bytes].
     pub fn to_bytes(&self) -> Bytes {
         match self {
-            Span::Many(bytes) => bytes
-                .iter()
-                .flat_map(|b| b.iter())
-                .cloned()
-                .collect::<Bytes>(),
+            Span::Many(bytes) => {
+                let mut bytes = BytesMut::new();
+                self.visit_bytes(&mut |b| bytes.extend(&b[..]));
+                bytes.freeze()
+            }
             Span::Single(bytes) => bytes.clone(),
             Span::Static(bytes) => Bytes::from_static(bytes),
         }
@@ -171,11 +184,11 @@ impl Span {
 
     /// The length of the span.
     pub fn len(&self) -> usize {
-        match self {
-            Span::Many(bytes) => bytes.iter().map(|b| b.len()).sum(),
-            Span::Single(bytes) => bytes.len(),
-            Span::Static(bytes) => bytes.len(),
-        }
+        let mut len = 0;
+
+        self.visit(&mut |b| len += b.len());
+
+        len
     }
 }
 

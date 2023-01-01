@@ -82,9 +82,8 @@ fn parse_bitstream_start_codes(bitstream: Span) -> Vec<Span> {
         NalInterest::Buffer
     });
 
-    for slice in bitstream.spans() {
-        acc.push(slice);
-    }
+    bitstream.visit(&mut |b| acc.push(b));
+
     acc.reset();
 
     nal_units

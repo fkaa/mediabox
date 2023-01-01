@@ -1,4 +1,5 @@
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncSeek, AsyncWrite, BufReader};
+use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWrite};
 
 #[cfg(feature = "fs")]
 use tokio::fs::File;
@@ -35,8 +36,8 @@ impl<T> ReadSeek for T where T: AsyncRead + AsyncSeek + Unpin + Send + Sync + 's
 impl<T> Read for T where T: AsyncRead + Unpin + Send + Sync + 'static {}
 
 pub enum Reader {
-    Seekable(BufReader<Box<dyn ReadSeek>>),
-    Stream(BufReader<Box<dyn Read>>),
+    Seekable(Box<dyn ReadSeek>),
+    Stream(Box<dyn Read>),
 }
 
 #[cfg(feature = "wasm")]
@@ -193,7 +194,7 @@ impl Io {
         Ok(Io {
             uri,
             writer: None,
-            reader: Some(Reader::Seekable(BufReader::new(Box::new(file)))),
+            reader: Some(Reader::Seekable(Box::new(file))),
         })
     }
 }
@@ -249,7 +250,7 @@ impl Io {
         Io {
             uri: Uri::parse_from(String::new()).unwrap(),
             writer: None,
-            reader: Some(Reader::Stream(BufReader::new(reader))),
+            reader: Some(Reader::Stream(reader)),
         }
     }
 
@@ -261,14 +262,14 @@ impl Io {
         match writer {
             Writer::Seekable(writer) => {
                 // TODO: replace with write_vectored
-                for span in span.spans() {
-                    writer.write_all(span).await?
+                for span in span.to_byte_spans() {
+                    writer.write_all(&span[..]).await?
                 }
             }
             Writer::Stream(writer) => {
                 // TODO: replace with write_vectored
-                for span in span.spans() {
-                    writer.write_all(span).await?
+                for span in span.to_byte_spans() {
+                    writer.write_all(&span[..]).await?
                 }
             }
         };
@@ -299,8 +300,6 @@ impl Io {
     }
 
     pub async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), IoError> {
-        use tokio::io::AsyncReadExt;
-
         let reader = self.reader.as_mut().ok_or(IoError::NotWriteable)?;
 
         match reader {
@@ -314,16 +313,18 @@ impl Io {
     pub async fn read_probe(&mut self) -> Result<&[u8], IoError> {
         let reader = self.reader.as_mut().ok_or(IoError::NotWriteable)?;
 
-        let inner_bytes = match reader {
+        /*let inner_bytes = match reader {
             Reader::Seekable(reader) => reader.fill_buf().await?,
             Reader::Stream(reader) => reader.fill_buf().await?,
         };
 
-        Ok(inner_bytes)
+        Ok(inner_bytes)*/
+
+        todo!()
     }
 
     pub async fn skip(&mut self, amt: u64) -> Result<(), IoError> {
-        use tokio::io::{self, AsyncReadExt, AsyncSeekExt};
+        use tokio::io::{self, AsyncSeekExt};
 
         let reader = self.reader.as_mut().ok_or(IoError::NotWriteable)?;
 
@@ -365,6 +366,114 @@ impl Io {
         };
 
         Ok(writer)
+    }
+}
+
+use std::cmp;
+use std::io;
+use std::iter;
+use std::iter::Iterator;
+
+/// Partial consumption buffer for any reader.
+pub struct GrowableBufferedReader {
+    inner: Reader,
+    buf: Vec<u8>,
+    pos: usize,
+    end: usize,
+    // Position in the stream of the buffer's beginning
+    index: usize,
+}
+
+impl GrowableBufferedReader {
+    /// Creates a new `AccReader` instance.
+    pub fn new(inner: Reader) -> GrowableBufferedReader {
+        GrowableBufferedReader::with_capacity(4096, inner)
+    }
+
+    /// Creates a new `AccReader` instance of a determined capacity
+    /// for a reader.
+    pub fn with_capacity(cap: usize, inner: Reader) -> GrowableBufferedReader {
+        GrowableBufferedReader {
+            inner,
+            buf: iter::repeat(0).take(cap).collect::<Vec<_>>(),
+            pos: 0,
+            end: 0,
+            index: 0,
+        }
+    }
+
+    /// Gets a reference to the underlying reader.
+    pub fn get_ref(&self) -> &Reader {
+        &self.inner
+    }
+
+    /// Gets a mutable reference to the underlying reader.
+    pub fn get_mut(&mut self) -> &mut Reader {
+        &mut self.inner
+    }
+
+    /// Unwraps the `AccReader`, returning the underlying reader.
+    ///
+    /// Note that any leftover data in the internal buffer is lost.
+    pub fn into_inner(self) -> Reader {
+        self.inner
+    }
+
+    /// Resets the buffer to the current position.
+    ///
+    /// All data before the current position is lost.
+    pub fn reset_buffer_position(&mut self) {
+        if self.end - self.pos > 0 {
+            self.buf.copy_within(self.pos..self.end, 0);
+        }
+
+        self.end -= self.pos;
+        self.pos = 0;
+    }
+
+    /// Returns buffer data.
+    pub fn current_slice(&self) -> &[u8] {
+        &self.buf[self.pos..self.end]
+    }
+
+    /// Returns buffer capacity.
+    pub fn capacity(&self) -> usize {
+        self.end - self.pos
+    }
+
+    pub fn grow(&mut self, len: usize) {
+        let l = self.buf.len() + len;
+        self.buf.resize(l, 0);
+    }
+
+    pub async fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        if self.pos != 0 || self.end != self.buf.len() {
+            self.reset_buffer_position();
+
+            let read = match self.inner {
+                Reader::Stream(ref mut r) => r.read(&mut self.buf[self.end..]).await?,
+                Reader::Seekable(ref mut r) => r.read(&mut self.buf[self.end..]).await?,
+            };
+
+            self.end += read;
+        }
+
+        Ok(&self.buf[self.pos..self.end])
+    }
+}
+
+pub trait Buffered {
+    fn data(&self) -> &[u8];
+    fn consume(&mut self, len: usize);
+}
+
+impl Buffered for GrowableBufferedReader {
+    fn data(&self) -> &[u8] {
+        &self.buf[self.pos..self.end]
+    }
+    fn consume(&mut self, amt: usize) {
+        self.pos = cmp::min(self.pos + amt, self.end);
+        self.index += amt;
     }
 }
 

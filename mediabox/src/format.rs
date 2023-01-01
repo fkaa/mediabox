@@ -1,9 +1,9 @@
-use std::{cmp::Ordering, fmt::Debug};
+use std::{cmp::Ordering, fmt::Debug, io::{SeekFrom}};
 
 use async_trait::async_trait;
 
 use crate::{
-    io::Io, AacCodec, AudioCodec, H264Codec, MediaTrackExt, Packet, Span, Track, VideoCodec,
+    io::{Io, GrowableBufferedReader, Buffered}, AacCodec, AudioCodec, H264Codec, MediaTrackExt, Packet, Span, Track, VideoCodec,
 };
 
 use std::fmt::Write;
@@ -37,6 +37,63 @@ macro_rules! muxer {
             create: $create,
         };
     };
+}
+
+pub struct DemuxerContext {
+    demuxer: Box<dyn Demuxer2>,
+    buf: GrowableBufferedReader,
+}
+
+impl DemuxerContext {
+    async fn read_headers(&mut self) -> anyhow::Result<Movie> {
+        loop {
+            match self.demuxer.read_headers(&mut self.buf)? {
+                DemuxerResponse::NeedMore(more) => {
+                    // TODO: grow if max capacity
+                    self.buf.grow(more);
+                    self.buf.fill_buf().await?;
+                },
+                DemuxerResponse::Seek(seek) => {
+                    // self.buf.seek(seek).await?;
+                    todo!()
+                },
+                DemuxerResponse::Movie(movie) => return Ok(movie),
+                DemuxerResponse::Packet(_) => unimplemented!(),
+            }
+        }
+    }
+
+    async fn read_packet(&mut self) -> anyhow::Result<Packet> {
+        loop {
+            match self.demuxer.read_packet(&mut self.buf)? {
+                DemuxerResponse::NeedMore(more) => {
+                    self.buf.grow(more);
+                    self.buf.fill_buf().await?;
+                },
+                DemuxerResponse::Seek(seek) => {
+                    // self.buf.seek(seek).await?;
+                    todo!()
+                },
+                DemuxerResponse::Movie(_) => unimplemented!(),
+                DemuxerResponse::Packet(packet) => return Ok(packet),
+            }
+        }
+    }
+    fn handle_response(&mut self, response: DemuxerResponse) {
+    }
+}
+
+pub trait Demuxer2 {
+    fn read_headers(&mut self, buf: &mut dyn Buffered) -> anyhow::Result<DemuxerResponse>;
+    fn read_packet(&mut self, buf: &mut dyn Buffered) -> anyhow::Result<DemuxerResponse>;
+}
+
+#[derive(Debug)]
+pub enum DemuxerResponse {
+    NeedMore(usize),
+    Seek(SeekFrom),
+    Movie(Movie),
+    Packet(Packet),
 }
 
 #[async_trait(?Send)]

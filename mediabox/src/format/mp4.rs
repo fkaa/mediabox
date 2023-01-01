@@ -457,16 +457,13 @@ fn write_video_sample_entry(buf: &mut BytesMut, info: &VideoInfo) -> anyhow::Res
 
                     let sps =
                         frame_nal_units(&[params.sps.clone()], BitstreamFraming::TwoByteLength);
-                    for span in sps.spans() {
-                        buf.extend_from_slice(span);
-                    }
+
+                    sps.visit(&mut |b| buf.extend_from_slice(b));
 
                     buf.put_u8(1); // pps_count
                     let pps =
                         frame_nal_units(&[params.pps.clone()], BitstreamFraming::TwoByteLength);
-                    for span in pps.spans() {
-                        buf.extend_from_slice(span);
-                    }
+                    pps.visit(&mut |b| buf.extend_from_slice(b));
                 });
             });
         }

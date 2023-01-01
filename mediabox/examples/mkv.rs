@@ -10,7 +10,7 @@ async fn main() {
     env_logger::init();
 
     let file = File::open("test.mkv").await.unwrap();
-    let out = File::create("test.mp4").await.unwrap();
+    let _out = File::create("test.mp4").await.unwrap();
     let mut demuxer = MatroskaDemuxer::new(Io::from_reader(Box::new(file)));
     let mut muxer = Mp4Muxer::new(Io::create_file("test.mp4").await.unwrap());
 

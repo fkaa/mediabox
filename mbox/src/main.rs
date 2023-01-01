@@ -1,9 +1,9 @@
-use anyhow::Context;
+
 use h264_reader::{
-    Context as H264Context,
-    nal::sps::SeqParameterSet,
     nal::pps::PicParameterSet,
+    nal::sps::SeqParameterSet,
     rbsp::{decode_nal, BitReader},
+    Context as H264Context,
 };
 
 use mediabox::format::*;
@@ -40,7 +40,7 @@ async fn analyze(args: Analyze) -> anyhow::Result<()> {
     cxt.register_all();
 
     let meta = cxt.probe(&mut io).await?;
-    let mut demuxer = meta.create(io);
+    let demuxer = meta.create(io);
 
     match args.subcommand {
         AnalyzeCmd::Codec(args) => analyze_codec(args, demuxer).await?,
@@ -50,7 +50,7 @@ async fn analyze(args: Analyze) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn analyze_codec(args: Codec, mut demuxer: Box<dyn Demuxer>) -> anyhow::Result<()> {
+async fn analyze_codec(_args: Codec, mut demuxer: Box<dyn Demuxer>) -> anyhow::Result<()> {
     let movie = demuxer.start().await?;
 
     for track in movie.tracks {
@@ -98,20 +98,41 @@ fn print_h264_codec(codec: &H264Codec) -> anyhow::Result<()> {
 
     let chroma = &sps.chroma_info;
     println!("\tchroma_format_idc: {:?}", chroma.chroma_format);
-    println!("\tseparate_colour_plane_flag: {}", chroma.separate_colour_plane_flag);
+    println!(
+        "\tseparate_colour_plane_flag: {}",
+        chroma.separate_colour_plane_flag
+    );
     println!("\tbit_depth_luma_minus8: {}", chroma.bit_depth_luma_minus8);
-    println!("\tbit_depth_chroma_minus8: {}", chroma.bit_depth_chroma_minus8);
-    println!("\tqpprime_y_zero_transform_bypass_flag: {}", chroma.qpprime_y_zero_transform_bypass_flag);
+    println!(
+        "\tbit_depth_chroma_minus8: {}",
+        chroma.bit_depth_chroma_minus8
+    );
+    println!(
+        "\tqpprime_y_zero_transform_bypass_flag: {}",
+        chroma.qpprime_y_zero_transform_bypass_flag
+    );
     println!("\tscaling_matrix: {:?}", chroma.scaling_matrix);
 
-    println!("\tlog2_max_frame_num_minus4: {}", sps.log2_max_frame_num_minus4);
+    println!(
+        "\tlog2_max_frame_num_minus4: {}",
+        sps.log2_max_frame_num_minus4
+    );
     println!("\tpic_order_cnt: {:?}", sps.pic_order_cnt);
     println!("\tmax_num_ref_frames: {}", sps.max_num_ref_frames);
-    println!("\tgaps_in_frame_num_value_allowed_flag: {}", sps.gaps_in_frame_num_value_allowed_flag);
+    println!(
+        "\tgaps_in_frame_num_value_allowed_flag: {}",
+        sps.gaps_in_frame_num_value_allowed_flag
+    );
     println!("\tpic_width_in_mbs_minus1: {}", sps.pic_width_in_mbs_minus1);
-    println!("\tpic_height_in_map_units_minus1: {}", sps.pic_height_in_map_units_minus1);
+    println!(
+        "\tpic_height_in_map_units_minus1: {}",
+        sps.pic_height_in_map_units_minus1
+    );
     println!("\tframe_mbs_flags: {:?}", sps.frame_mbs_flags);
-    println!("\tdirect_8x8_inference_flag: {}", sps.direct_8x8_inference_flag);
+    println!(
+        "\tdirect_8x8_inference_flag: {}",
+        sps.direct_8x8_inference_flag
+    );
 
     if let Some(crop) = &sps.frame_cropping {
         println!("\tframe_cropping_flag: true");
@@ -119,7 +140,6 @@ fn print_h264_codec(codec: &H264Codec) -> anyhow::Result<()> {
         println!("\tframe_crop_right_offset: {}", crop.right_offset);
         println!("\tframe_crop_top_offset: {}", crop.top_offset);
         println!("\tframe_crop_bottom_offset: {}", crop.bottom_offset);
-
     } else {
         println!("\tframe_cropping_flag: false");
     }
@@ -127,7 +147,6 @@ fn print_h264_codec(codec: &H264Codec) -> anyhow::Result<()> {
     if let Some(vui) = &sps.vui_parameters {
         println!("\tvui_parameters_present_flag: true");
         println!("\tvui: {:#?}", vui);
-
     } else {
         println!("\tvui_parameters_present_flag: false");
     }
@@ -139,14 +158,15 @@ fn print_h264_codec(codec: &H264Codec) -> anyhow::Result<()> {
     let nal = decode_nal(&pps_slice[1..])?;
 
     let reader = BitReader::new(nal.as_ref());
-    let pps = PicParameterSet::from_bits(&context, reader).map_err(|e| anyhow::anyhow!("{:?}", e))?;
+    let _pps =
+        PicParameterSet::from_bits(&context, reader).map_err(|e| anyhow::anyhow!("{:?}", e))?;
 
     // println!("{:#?}", pps);
 
     Ok(())
 }
 
-async fn analyze_packets(args: Packets, mut demuxer: Box<dyn Demuxer>) -> anyhow::Result<()> {
+async fn analyze_packets(_args: Packets, mut demuxer: Box<dyn Demuxer>) -> anyhow::Result<()> {
     let movie = demuxer.start().await?;
 
     eprintln!("Tracks:");
@@ -173,10 +193,10 @@ async fn analyze_packets(args: Packets, mut demuxer: Box<dyn Demuxer>) -> anyhow
 }
 
 fn print_packet(
-    idx: usize,
-    pkt: Packet,
+    _idx: usize,
+    _pkt: Packet,
     packet_filter: &Option<PacketFilter>,
-    nal_filter: &Option<NalFilter>,
+    _nal_filter: &Option<NalFilter>,
 ) {
     if packet_filter.is_some() {}
 }

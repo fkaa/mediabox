@@ -1,6 +1,10 @@
 use tokio::fs::File;
 
-use crate::{Packet, format::{mkv::MatroskaDemuxer, Movie, Muxer, Demuxer}, io::Io};
+use crate::{
+    format::{mkv::MatroskaDemuxer, Demuxer, Movie, Muxer},
+    io::Io,
+    Packet,
+};
 
 pub struct TestFile {
     pub path: &'static str,
@@ -8,9 +12,7 @@ pub struct TestFile {
 
 impl TestFile {
     pub fn new(path: &'static str) -> Self {
-        TestFile {
-            path,
-        }
+        TestFile { path }
     }
 }
 
@@ -25,7 +27,7 @@ macro_rules! test_files2 {
 #[macro_export]
 macro_rules! test_files {
     ($func:item) => {
-        $crate::test_files2!{
+        $crate::test_files2! {
             $func ;
             "testsrc-h264.mkv",
             "testsrc-h264-no-bframes.mkv"

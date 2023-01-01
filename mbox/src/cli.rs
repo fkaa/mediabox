@@ -28,7 +28,7 @@ pub struct PacketFilter {}
 impl FromStr for PacketFilter {
     type Err = anyhow::Error;
 
-    fn from_str(val: &str) -> Result<Self, Self::Err> {
+    fn from_str(_val: &str) -> Result<Self, Self::Err> {
         Ok(PacketFilter {})
     }
 }
@@ -39,7 +39,7 @@ pub struct NalFilter {}
 impl FromStr for NalFilter {
     type Err = anyhow::Error;
 
-    fn from_str(val: &str) -> Result<Self, Self::Err> {
+    fn from_str(_val: &str) -> Result<Self, Self::Err> {
         Ok(NalFilter {})
     }
 }

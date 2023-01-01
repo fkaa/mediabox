@@ -1,19 +1,17 @@
 use anyhow::Context;
 use async_trait::async_trait;
 use bytes::{BufMut, BytesMut};
-use log::*;
 
-use std::{collections::HashMap, io::SeekFrom, time::Duration};
+
+use std::{collections::HashMap, io::SeekFrom};
 
 use crate::{
-    codec::nal::{convert_bitstream, BitstreamFraming},
     format::Muxer,
     io::Io,
-    muxer, H264Codec, MediaDuration, MediaKind, MediaTime, Packet, Span, Track, VideoCodec,
-    VideoInfo,
+    muxer, Packet, Track,
 };
 
-use super::{write_audio_trak, write_video_trak, SampleEntry, TrackBuilder};
+use super::{SampleEntry, TrackBuilder};
 
 muxer!("fmp4", Mp4Muxer::create);
 
@@ -115,7 +113,7 @@ impl Muxer for Mp4Muxer {
         self.write_moov_box().await?;
         Ok(())
     }
-    
+
     fn into_io(self) -> Io {
         self.io
     }

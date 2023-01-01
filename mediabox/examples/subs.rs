@@ -38,7 +38,10 @@ async fn main() {
         eprintln!("#{}: {:?}", track.id, track.info);
     }
 
-    let transcode_mapping = movie.subtitles().filter_map(|t| transcode_subtitles(&cxt, t)).collect();
+    let transcode_mapping = movie
+        .subtitles()
+        .filter_map(|t| transcode_subtitles(&cxt, t))
+        .collect();
 
     let mut transcoder = PacketTranscoder::new(transcode_mapping);
 

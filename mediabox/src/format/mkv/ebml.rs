@@ -1,15 +1,187 @@
-use bytes::BytesMut;
+use bytes::{BufMut, Bytes, BytesMut};
+use nom::{IResult, Needed};
 
 use crate::{
-    codec::{nal::get_codec_from_mp4, AssCodec, SubtitleCodec, SubtitleInfo},
-    demuxer,
-    format::{ProbeResult, Demuxer, Movie},
     io::Io,
-    AacCodec, AudioCodec, AudioInfo, Fraction, MediaInfo, MediaKind, MediaTime, Packet, SoundType,
-    Track,
+    Span, format::DemuxerResponse,
 };
 
 use super::*;
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct EbmlId(pub u64);
+#[derive(Debug)]
+pub enum EbmlLength {
+    Known(u64),
+    Unknown(u8),
+}
+#[derive(Debug)]
+pub struct EbmlMasterElement(pub EbmlId, pub Vec<EbmlElement>);
+#[derive(Debug)]
+pub struct EbmlElement(pub EbmlId, pub EbmlValue);
+#[derive(Debug)]
+pub enum EbmlValue {
+    Int(i64),
+    UInt(u64),
+    String(String),
+    Binary(Bytes),
+    MasterElement(EbmlMasterElement),
+}
+
+impl EbmlValue {
+    fn size(&self) -> u64 {
+        match self {
+            &EbmlValue::Int(value) => int_element_bytes_required(value) as u64,
+            &EbmlValue::UInt(value) => uint_element_bytes_required(value) as u64 + 1,
+            EbmlValue::String(string) => string.as_bytes().len() as u64,
+            EbmlValue::Binary(binary) => binary.len() as u64,
+            EbmlValue::MasterElement(el) => el.size(),
+        }
+    }
+
+    pub fn write(&self, buf: &mut BytesMut) {
+        match self {
+            &EbmlValue::Int(value) => write_int_elem(buf, value),
+            &EbmlValue::UInt(value) => write_uint_elem(buf, value),
+            EbmlValue::String(string) => buf.extend_from_slice(string.as_bytes()),
+            EbmlValue::Binary(binary) => buf.extend_from_slice(&binary),
+            EbmlValue::MasterElement(el) => el.write(buf),
+        }
+    }
+}
+
+impl EbmlId {
+    fn size(&self) -> u64 {
+        (self.0.ilog2() as u64 + 7) / 8
+    }
+
+    pub fn write(&self, buf: &mut BytesMut) {
+        write_vid(buf, self.0);
+    }
+}
+
+impl EbmlLength {
+    fn size(&self) -> u64 {
+        match self {
+            &EbmlLength::Known(length) => vint_bytes_required(length),
+            &EbmlLength::Unknown(bytes) => bytes as u64,
+        }
+    }
+
+    pub fn write(&self, buf: &mut BytesMut) {
+        match self {
+            &EbmlLength::Known(length) => write_vint(buf, length),
+            &EbmlLength::Unknown(bytes) => buf.put_u8(0b1111_1111),
+        }
+    }
+}
+
+impl EbmlMasterElement {
+    fn full_size(&self) -> u64 {
+        self.0.size() + self.size()
+    }
+
+    fn size(&self) -> u64 {
+        self.1.iter().map(|v| v.full_size()).sum::<u64>()
+    }
+
+    pub fn write(&self, buf: &mut BytesMut) {
+        self.0.write(buf);
+        EbmlLength::Known(self.size()).write(buf);
+
+        for element in &self.1 {
+            element.write(buf);
+        }
+    }
+}
+
+impl EbmlElement {
+    fn full_size(&self) -> u64 {
+        self.0.size() + EbmlLength::Known(self.size()).size() + self.size()
+    }
+
+    fn size(&self) -> u64 {
+        self.1.size()
+    }
+
+    pub fn write(&self, buf: &mut BytesMut) {
+        println!("{:?}: {:?} ({})", self.0, self.1, self.size());
+        self.0.write(buf);
+        EbmlLength::Known(self.size()).write(buf);
+
+        self.1.write(buf);
+    }
+}
+
+pub fn write_ebml<F: FnOnce(&mut BytesMut) -> R, R: Into<Span>>(id: u64, func: F) -> Span {
+    let mut content = BytesMut::new();
+    let span = func(&mut content);
+
+    let mut buf = BytesMut::with_capacity(8);
+    EbmlId(id).write(&mut buf);
+    EbmlLength::Known(content.len() as u64).write(&mut buf);
+
+    [Span::from(buf.freeze()), Span::from(content.freeze())]
+        .into_iter()
+        .collect()
+}
+
+fn t() {
+    write_ebml(EBML_HEADER as u64, |buf| {
+        write_ebml(EBML_DOC_TYPE as u64, |buf| write_vstr(buf, "matroska"))
+    });
+}
+
+#[macro_export]
+macro_rules! write_ebml {
+    ($id:expr, $buf:ident => [$($b:expr),*]) => {
+        {
+            let mut content_spans = Vec::new();
+
+            $(
+                let mut $buf = bytes::BytesMut::new();
+                let b = $b;
+                // dbg!(&$buf);
+                dbg!(&b);
+                if ($buf.len() > 0) {
+                    content_spans.push($crate::Span::from($buf.freeze()));
+                }
+            )*
+
+            let content = content_spans.into_iter().collect::<$crate::Span>();
+
+            let mut buf = bytes::BytesMut::with_capacity(8);
+            $crate::format::mkv::ebml::write_vid(&mut buf, $id as u64);
+            $crate::format::mkv::ebml::write_vint(&mut buf, content.len() as u64);
+
+            [$crate::Span::from(buf.freeze()), content].into_iter().collect::<$crate::Span>()
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! ebml {
+    ($io:expr, $size:expr, $( $pat:pat_param => $blk:block ),* ) => {
+        let mut i = 0;
+        while i < $size {
+            let (len, id) = vid($io).await?;
+            i += len as u64;
+            let (len, size) = vint($io).await?;
+            i += len as u64;
+
+            match (id, size) {
+                $( $pat => $blk, )*
+                _ => {
+                    log::debug!("Ignoring element: 0x{id:08x} ({size} B) ({i}/{})", $size);
+
+                    $io.skip(size).await?;
+                }
+            }
+
+            i += size;
+        }
+    }
+}
 
 pub async fn vstr(io: &mut Io, size: u64) -> Result<String, MkvError> {
     let mut data = vec![0u8; size as usize];
@@ -17,6 +189,11 @@ pub async fn vstr(io: &mut Io, size: u64) -> Result<String, MkvError> {
     io.read_exact(&mut data).await?;
 
     Ok(String::from_utf8(data)?)
+}
+
+pub fn write_vstr(buf: &mut BytesMut, string: &str) {
+    write_vint(buf, string.as_bytes().len() as u64);
+    buf.extend_from_slice(string.as_bytes());
 }
 
 pub async fn vfloat(io: &mut Io, size: u64) -> Result<f64, MkvError> {
@@ -57,6 +234,141 @@ pub async fn vu(io: &mut Io, size: u64) -> Result<u64, MkvError> {
     Ok(value)
 }
 
+pub async fn uint_elem(io: &mut Io) -> Result<u64, MkvError> {
+    use tokio::io::AsyncReadExt;
+
+    let reader = io.reader()?;
+
+    let len = reader.read_u8().await?;
+
+    if len > 7 {
+        return Err(MkvError::UnsupportedVint(len as u64));
+    }
+
+    let mut bytes = [0u8; 7];
+    if len > 0 {
+        reader
+            .read_exact(&mut bytes[..len as usize])
+            .await?;
+    }
+
+    let mut value = 0;
+
+    for i in 0..len {
+        value <<= 8;
+        value |= bytes[i as usize] as u64;
+    }
+
+    Ok(value)
+}
+
+#[derive(Debug)]
+pub enum EbmlError {
+    NeedMore(usize),
+}
+
+pub fn ebml_vint(input: &[u8]) -> IResult<&[u8], u64, EbmlError> {
+    if input.is_empty() {
+        return Err(nom::Err::Incomplete(Needed::new(1)));
+    }
+
+    let byte = input[0];
+    let extra_bytes = byte.leading_zeros() as u8;
+    let len = 1 + extra_bytes as usize;
+
+    if extra_bytes > 7 {
+        todo!()
+    }
+
+    if input.len() < len {
+        return Err(nom::Err::Incomplete(Needed::new(len - input.len())));
+    }
+
+    let mut value = byte as u64 & ((1 << (8 - len)) - 1) as u64;
+
+    for i in 0..extra_bytes {
+        value <<= 8;
+        value |= input[1 + i as usize] as u64;
+    }
+
+    Ok((&input[len..], value))
+}
+
+pub fn ebml_len(input: &[u8]) -> IResult<&[u8], EbmlLength, EbmlError> {
+    if input.is_empty() {
+        return Err(nom::Err::Incomplete(Needed::new(1)));
+    }
+
+    let byte = input[0];
+    let extra_bytes = byte.leading_zeros() as u8;
+    let len = 1 + extra_bytes as usize;
+
+    if extra_bytes > 7 {
+        todo!()
+    }
+
+    if input.len() < len {
+        return Err(nom::Err::Incomplete(Needed::new(len - input.len())));
+    }
+
+    let mut value = byte as u64 & ((1 << (8 - len)) - 1) as u64;
+
+    for i in 0..extra_bytes {
+        value <<= 8;
+        value |= input[1 + i as usize] as u64;
+    }
+
+    let length = if value == 1 << (7 * len) {
+        EbmlLength::Unknown(len as u8) 
+    } else {
+        EbmlLength::Known(value)
+    };
+
+    Ok((&input[len..], length))
+}
+
+pub fn ebml_vid(input: &[u8]) -> IResult<&[u8], EbmlId, EbmlError> {
+    if input.is_empty() {
+        return Err(nom::Err::Incomplete(Needed::new(1)));
+    }
+
+    let byte = input[0];
+    let extra_bytes = byte.leading_zeros() as u8;
+    let len = 1 + extra_bytes as usize;
+
+    if extra_bytes > 7 {
+        todo!()
+    }
+
+    if input.len() < len {
+        return Err(nom::Err::Incomplete(Needed::new(len - input.len())));
+    }
+
+    let mut value = byte as u64;
+
+    for i in 0..extra_bytes {
+        value <<= 8;
+        value |= input[1 + i as usize] as u64;
+    }
+
+    Ok((&input[len..], EbmlId(value)))
+}
+
+pub fn ebml_int(input: &[u8], size: usize) -> IResult<&[u8], u64, EbmlError> {
+    if input.len() < size {
+        return Err(nom::Err::Incomplete(Needed::new(size - input.len())));
+    }
+
+    let value = input[..size].iter().fold(0, |acc, b| (acc << 8) | *b as u64);
+
+    Ok((&input[size..], value))
+}
+
+pub fn ebml_master_element(input: &[u8]) -> IResult<&[u8], u64, EbmlError> {
+
+    todo!()
+}
+
 pub async fn vint(io: &mut Io) -> Result<(u8, u64), MkvError> {
     use tokio::io::AsyncReadExt;
 
@@ -87,7 +399,7 @@ pub async fn vint(io: &mut Io) -> Result<(u8, u64), MkvError> {
     Ok((len as u8, value))
 }
 
-pub async fn vid(io: &mut Io) -> Result<(u8, u32), MkvError> {
+pub async fn vid(io: &mut Io) -> Result<(u8, u64), MkvError> {
     use tokio::io::AsyncReadExt;
 
     let reader = io.reader()?;
@@ -107,20 +419,84 @@ pub async fn vid(io: &mut Io) -> Result<(u8, u32), MkvError> {
             .await?;
     }
 
-    let mut value = byte as u32;
+    let mut value = byte as u64;
 
     for i in 0..extra_bytes {
         value <<= 8;
-        value |= bytes[i as usize] as u32;
+        value |= bytes[i as usize] as u64;
     }
 
     Ok((len as u8, value))
 }
 
-fn write_vint(buf: &mut BytesMut, value: u64) {
+pub fn write_vint(buf: &mut BytesMut, mut value: u64) {
+    let bytes_required = vint_bytes_required(value);
+    let len = 1 << (8 - bytes_required);
 
+    value |= len << ((bytes_required - 1) * 8);
+
+    let bytes = value.to_be_bytes();
+
+    buf.extend(&bytes[8 - bytes_required as usize..]);
 }
 
+pub fn write_vid(buf: &mut BytesMut, id: u64) {
+    let len = (id.ilog2() + 7) / 8;
+
+    for i in (0..len).rev() {
+        buf.put_u8((id >> (i * 8)) as u8);
+    }
+}
+
+fn write_int_elem(buf: &mut BytesMut, mut value: i64) {
+    while value > 0 {
+        buf.put_u8((value & 0xff) as u8);
+    
+        value >>= 8;
+    }
+}
+
+fn write_uint_elem(buf: &mut BytesMut, mut value: u64) {
+    while value > 0 {
+        buf.put_u8((value & 0xff) as u8);
+    
+        value >>= 8;
+    }
+}
+
+fn int_element_bytes_required(value: i64) -> u8 {
+    if value == 0 {
+        return 1;
+    }
+
+    (value.ilog2() as u8 ) / 8
+}
+
+fn uint_element_bytes_required(value: u64) -> u8 {
+    if value == 0 {
+        return 1;
+    }
+
+    (value.ilog2() as u8 ) / 8
+}
+
+fn vint_bytes_required(value: u64) -> u64 {
+    if value == 0 {
+        return 1;
+    }
+
+    match value.ilog2() + 1 {
+        0..=7 => 1,
+        8..=14 => 2,
+        15..=21 => 3,
+        22..=28 => 4,
+        29..=35 => 5,
+        36..=42 => 6,
+        43..=49 => 7,
+        50..=56 => 8,
+        _ => todo!("error"),
+    }
+}
 
 #[cfg(test)]
 mod test {
@@ -134,7 +510,7 @@ mod test {
     #[test_case(&[0b0010_0000, 0b0000_0000, 0b0000_0010], 2)]
     #[test_case(&[0b0001_0000, 0b0000_0000, 0b0000_0000, 0b0000_0010], 2)]
     #[tokio::test]
-    async fn vint(bytes: &[u8], expected: u64) {
+    async fn test_vint(bytes: &[u8], expected: u64) {
         let cursor = Cursor::new(bytes.to_vec());
         let mut io = Io::from_reader(Box::new(cursor));
 
@@ -143,18 +519,81 @@ mod test {
         assert_matches!(value, Ok(expected));
     }
 
+    #[test_case(0)]
+    #[test_case(1)]
+    #[test_case(u8::max_value() as u64)]
+    #[test_case(u8::max_value() as u64 + 1)]
+    #[test_case(u16::max_value() as u64)]
+    #[test_case(u16::max_value() as u64 + 1)]
+    #[test_case(u32::max_value() as u64)]
+    #[test_case(u32::max_value() as u64 + 1)]
+    #[test_case((1u64 << 56) - 1)]
     #[tokio::test]
-    async fn read_write_vint() {
+    async fn read_write_vint(expected_value: u64) {
         let mut buf = BytesMut::new();
+        write_vint(&mut buf, expected_value);
 
-        for i in 0..100 { // u32::max_value() {
-            buf.clear();
-            write_vint(&mut buf, i);
+        let mut io = Io::from_reader(Box::new(Cursor::new(buf.to_vec())));
+        let (_len, value) = super::vint(&mut io).await.unwrap();
 
-            let mut io = Io::from_reader(Box::new(Cursor::new(buf.to_vec())));
-            let (_len, value) = super::vint(&mut io).await.unwrap();
+        assert_eq!(expected_value, value);
+    }
 
-            assert_eq!(i, value);
-        }
+    #[test_case(EBML_HEADER as u64)]
+    #[test_case(EBML_DOC_TYPE as u64)]
+    #[test_case(SEGMENT as u64)]
+    #[test_case(TRACK_ENTRY as u64)]
+    #[tokio::test]
+    async fn read_write_vid_u32(expected_value: u64) {
+        let mut buf = BytesMut::new();
+        EbmlId(expected_value).write(&mut buf);
+
+        let mut io = Io::from_reader(Box::new(Cursor::new(buf.to_vec())));
+        let (_len, value) = super::vid(&mut io).await.unwrap();
+
+        assert_eq!(expected_value as u64, value as u64);
+    }
+
+    #[tokio::test]
+    async fn read_write_ebml() {
+        let header = EbmlMasterElement(
+            EbmlId(EBML_HEADER),
+            vec![
+                EbmlElement(EbmlId(EBML_DOC_TYPE), EbmlValue::String("matroska".into())),
+                EbmlElement(EbmlId(EBML_DOC_TYPE_VERSION), EbmlValue::UInt(1)),
+            ],
+        );
+
+        let mut bytes = BytesMut::new();
+        header.write(&mut bytes);
+
+        let mut doc_type = None;
+        let mut doc_version = None;
+
+        let len = bytes.len();
+        dbg!(&bytes);
+
+        let bytes = bytes.to_vec();
+        let mut io = Io::from_reader(Box::new(Cursor::new(bytes)));
+
+        let a: anyhow::Result<()> = try {
+            ebml!(&mut io, len as u64,
+                (EBML_HEADER, size) => {
+                    eprintln!("siz={size}"
+                    );
+                    ebml!(&mut io, size,
+                        (self::EBML_DOC_TYPE, size) => {
+                            doc_type = Some(vstr(&mut io, size).await.unwrap());
+                        },
+                        (self::EBML_DOC_TYPE_VERSION, size) => {
+                            doc_version = Some(vu(&mut io, size).await.unwrap());
+                        }
+                    );
+                }
+            );
+        };
+
+        assert_eq!(doc_type.as_deref(), Some("matroska"));
+        assert_eq!(doc_version, Some(1));
     }
 }

@@ -4,42 +4,21 @@ use async_trait::async_trait;
 use h264_reader::avcc::AvcDecoderConfigurationRecord;
 use log::*;
 
-use std::sync::Arc;
+use std::{sync::Arc, io::SeekFrom};
 
-use super::*;
+use crate::{ebml, format::{Demuxer2, DemuxerResponse}, io::Buffered};
+
 use super::ebml::*;
+use super::*;
 
 use crate::{
     codec::{nal::get_codec_from_mp4, AssCodec, SubtitleCodec, SubtitleInfo},
     demuxer,
-    format::{ProbeResult, Demuxer, Movie},
+    format::{Demuxer, Movie, ProbeResult},
     io::Io,
     AacCodec, AudioCodec, AudioInfo, Fraction, MediaInfo, MediaKind, MediaTime, Packet, SoundType,
     Track,
 };
-
-macro_rules! ebml {
-    ($io:expr, $size:expr, $( $pat:pat_param => $blk:block ),* ) => {
-        let mut i = 0;
-        while i < $size {
-            let (len, id) = vid($io).await?;
-            i += len as u64;
-            let (len, size) = vint($io).await?;
-            i += len as u64;
-
-            match (id, size) {
-                $( $pat => $blk, )*
-                _ => {
-                    trace!("Ignoring element: 0x{id:08x} ({size} B)");
-
-                    $io.skip(size).await?;
-                }
-            }
-
-            i += size;
-        }
-    }
-}
 
 demuxer!("mkv", MatroskaDemuxer::create, MatroskaDemuxer::probe);
 
@@ -48,6 +27,37 @@ pub struct MatroskaDemuxer {
     streams: Vec<Track>,
     timebase: Fraction,
     current_cluster_ts: u64,
+}
+
+enum State {
+    LookingFor(EbmlId),
+}
+
+impl Demuxer2 for MatroskaDemuxer {
+    fn read_headers(&mut self, buf: &mut dyn Buffered) -> anyhow::Result<DemuxerResponse> {
+        let input = buf.data();
+        let (input, id) = ebml_vid(input)?;
+        let (input, len) = ebml_len(input)?;
+
+        if id == EbmlId(EBML_HEADER) {
+
+        } else {
+            match len {
+                EbmlLength::Known(len) => {
+                    return Ok(DemuxerResponse::Seek(SeekFrom::Current(len as i64)));
+                }
+                EbmlLength::Unknown(_) => {
+                    anyhow::bail!("Unknown length when looking for movie");
+                }
+            }
+        }
+
+        todo!()
+    }
+
+    fn read_packet(&mut self, buf: &mut dyn crate::io::Buffered) -> anyhow::Result<crate::format::DemuxerResponse> {
+        todo!()
+    }
 }
 
 impl MatroskaDemuxer {
@@ -268,9 +278,7 @@ impl MatroskaDemuxer {
 
         let (len, track_number) = vint(&mut self.io).await?;
 
-        let track = if let Some(track) = self.streams.iter().find(|s| s.id == track_number as u32) {
-            track.clone()
-        } else {
+        let Some(track) = self.streams.iter().find(|s| s.id == track_number as u32).cloned() else {
             self.io.skip(size - len as u64).await?;
 
             return Ok(None);
@@ -396,7 +404,7 @@ impl Demuxer for MatroskaDemuxer {
     }
 }
 
-fn mand<T>(value: Option<T>, id: u32) -> Result<T, MkvError> {
+fn mand<T>(value: Option<T>, id: u64) -> Result<T, MkvError> {
     value.ok_or(MkvError::MissingElement(id))
 }
 
