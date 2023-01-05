@@ -1,19 +1,37 @@
+use std::{str::Utf8Error, error::Error};
+
 use bytes::{BufMut, Bytes, BytesMut};
-use nom::{IResult, Needed};
+use nom::{IResult, Needed, Parser, combinator::{flat_map, verify, opt}, sequence::pair, error::ParseError, bytes::streaming::take, bytes::complete::tag, branch::{permutation, alt, Alt}};
 
 use crate::{
     io::Io,
-    Span, format::DemuxerResponse,
+    Span, format::{DemuxerResponse, DemuxerError},
 };
 
 use super::*;
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
 pub struct EbmlId(pub u64);
-#[derive(Debug)]
+
+impl std::fmt::Debug for EbmlId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "EbmlId(0x{:x})", self.0)
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
 pub enum EbmlLength {
     Known(u64),
     Unknown(u8),
+}
+impl EbmlLength {
+    pub fn require(self) -> Result<u64, EbmlError> {
+        let EbmlLength::Known(size) = self else {
+            return Err(EbmlError::UnknownSize);
+        };
+
+        Ok(size)
+    }
 }
 #[derive(Debug)]
 pub struct EbmlMasterElement(pub EbmlId, pub Vec<EbmlElement>);
@@ -262,9 +280,43 @@ pub async fn uint_elem(io: &mut Io) -> Result<u64, MkvError> {
     Ok(value)
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum EbmlError {
-    NeedMore(usize),
+    #[error("element")]
+    Element(&'static str),
+    #[error("Unexpected EBML element {0:?}")]
+    UnexpectedElement(EbmlId, EbmlLength),
+    #[error("Expected known size, but was unknown")]
+    UnknownSize,
+    #[error("{0}")]
+    InvalidString(Utf8Error),
+}
+
+impl<'a> ParseError<&'a [u8]> for EbmlError {
+    fn from_error_kind(input: &'a [u8], kind: nom::error::ErrorKind) -> Self {
+        EbmlError::Element("test")
+    }
+
+    fn append(input: &'a [u8], kind: nom::error::ErrorKind, other: Self) -> Self {
+        other
+    }
+}
+
+impl From<EbmlError> for nom::Err<EbmlError> {
+    fn from(value: EbmlError) -> Self {
+        nom::Err::Error(value)
+    }
+}
+
+impl From<nom::Err<EbmlError>> for DemuxerError {
+    fn from(value: nom::Err<EbmlError>) -> Self {
+        match value {
+            nom::Err::Incomplete(Needed::Size(sz)) => DemuxerError::NeedMore(sz.into()),
+            nom::Err::Incomplete(Needed::Unknown) => DemuxerError::NeedMore(4096),
+            nom::Err::Error(_) => todo!(),
+            nom::Err::Failure(_) => todo!(),
+        }
+    }
 }
 
 pub fn ebml_vint(input: &[u8]) -> IResult<&[u8], u64, EbmlError> {
@@ -364,9 +416,127 @@ pub fn ebml_int(input: &[u8], size: usize) -> IResult<&[u8], u64, EbmlError> {
     Ok((&input[size..], value))
 }
 
-pub fn ebml_master_element(input: &[u8]) -> IResult<&[u8], u64, EbmlError> {
+pub fn ebml_master_element_fold<'a, F, Q>(
+    expected_id: EbmlId,
+    mut default: Q,
+    mut parser: F,
+) -> impl FnOnce(&'a [u8]) -> IResult<&'a [u8], Q, EbmlError>
+    where
+        F: FnMut(&mut Q, &'a [u8]) -> Result<(), nom::Err<EbmlError>>,
+{
+    move |input| {
+        let (input, (id, len)) = ebml_element_header()(input)?;
 
-    todo!()
+        eprintln!("id={id:?}, len={len:?}");
+
+        if id != expected_id {
+            return Err(nom::Err::Error(EbmlError::UnexpectedElement(id, len)));
+        }
+
+        let len = len.require()?;
+        
+        let (remaining, mut input) = take(len)(input)?;
+
+        while !input.is_empty() {
+            let (remaining, (id, len)) = ebml_element_header()(input)?;
+            eprintln!("> id={id:?}, len={len:?}");
+            let len = len.require()? as usize;
+
+            parser(&mut default, input)?;
+
+            input = &remaining[len..];
+        }
+
+
+        Ok((remaining, default))
+    }
+}
+
+pub fn ebml_element<'a, P, F, T>(expected_id: EbmlId, parser: F) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], T, EbmlError>
+    where
+        P: Parser<&'a [u8], T, EbmlError>,
+        F: Fn(EbmlLength) -> P,
+{
+    move |input| {
+        let (input, (id, length)) = ebml_element_header()(input)?;
+
+        if id != expected_id {
+            return Err(nom::Err::Error(EbmlError::UnexpectedElement(id, length)));
+        }
+
+        parser(length).parse(input)
+    }
+}
+
+pub fn ebml_element_header<'a>() -> impl Fn(&'a [u8]) -> IResult<&'a [u8], (EbmlId, EbmlLength), EbmlError> {
+    move |input| {
+        pair(
+            ebml_vid,
+            ebml_len)(input)
+    }
+}
+
+pub fn ebml_uint<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], u64, EbmlError> {
+    ebml_element(id, |size| {
+        move |input: &'a [u8]| {
+            let size = size.require()?;
+
+            let (remaining, bytes) = take(size)(input)?;
+
+            let value = bytes
+                .iter()
+                .fold(0u64, |acc, val| (acc << 8u64) | *val as u64);
+
+            Ok((remaining, value))
+        }
+    })
+}
+
+#[test]
+fn nom() {
+    let a = b"1122334455";
+
+
+    let b: IResult<_, _> = permutation((
+            tag("11"),
+            opt(tag("33")),
+        ))(&a[..]);
+
+    dbg!(b
+        );
+
+    panic!("");
+}
+
+pub fn ebml_int2<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], i64, EbmlError> {
+    ebml_element(id, |size| {
+        move |input: &'a [u8]| {
+            let size = size.require()?;
+
+            let (remaining, bytes) = take(size)(input)?;
+
+            let value = bytes
+                .iter()
+                .fold(0i64, |acc, val| (acc << 8i64) | *val as i64);
+
+            Ok((remaining, value))
+        }
+    })
+}
+
+pub fn ebml_str<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a str, EbmlError> {
+    ebml_element(id, |size| {
+        move |input: &'a [u8]| {
+            let size = size.require()?;
+
+            let (remaining, bytes) = take(size)(input)?;
+
+            let value = std::str::from_utf8(bytes)
+                .map_err(EbmlError::InvalidString)?;
+
+            Ok((remaining, value))
+        }
+    })
 }
 
 pub async fn vint(io: &mut Io) -> Result<(u8, u64), MkvError> {

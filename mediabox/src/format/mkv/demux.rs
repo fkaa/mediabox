@@ -3,10 +3,11 @@ use anyhow::Context;
 use async_trait::async_trait;
 use h264_reader::avcc::AvcDecoderConfigurationRecord;
 use log::*;
+use nom::{branch::alt, combinator::opt};
 
 use std::{sync::Arc, io::SeekFrom};
 
-use crate::{ebml, format::{Demuxer2, DemuxerResponse}, io::Buffered};
+use crate::{ebml, format::{Demuxer2, DemuxerResponse, DemuxerError}, io::Buffered};
 
 use super::ebml::*;
 use super::*;
@@ -27,46 +28,157 @@ pub struct MatroskaDemuxer {
     streams: Vec<Track>,
     timebase: Fraction,
     current_cluster_ts: u64,
+    state: State,
 }
 
 enum State {
-    LookingFor(EbmlId),
+    LookingForEbmlHeader,
+    LookingForSegment,
+    ParseUntilFirstCluster,
+}
+
+fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
+    #[derive(Debug, Default)]
+    struct EbmlHeader<'a> {
+        version: Option<u64>,
+        read_version: Option<u64>,
+        max_id_length: Option<u64>,
+        max_size_length: Option<u64>,
+        doc_type: Option<&'a str>,
+        doc_type_version: Option<u64>,
+        doc_type_read_version: Option<u64>,
+    }
+
+    let header_result = ebml_master_element_fold(
+        EbmlId(EBML_HEADER),
+        EbmlHeader::default(),
+        |acc, input| {
+            acc.version = acc.version.or(opt(ebml_uint(EbmlId(EBML_VERSION)))(input)?.1);
+            acc.read_version = acc.read_version.or(opt(ebml_uint(EbmlId(EBML_READ_VERSION)))(input)?.1);
+            acc.max_id_length = acc.max_id_length.or(opt(ebml_uint(EbmlId(EBML_DOC_MAX_ID_LENGTH)))(input)?.1);
+            acc.max_size_length = acc.max_size_length.or(opt(ebml_uint(EbmlId(EBML_DOC_MAX_SIZE_LENGTH)))(input)?.1);
+            acc.doc_type = acc.doc_type.or(opt(ebml_str(EbmlId(EBML_DOC_TYPE)))(input)?.1);
+            acc.doc_type_version = acc.doc_type_version.or(opt(ebml_uint(EbmlId(EBML_DOC_TYPE_VERSION)))(input)?.1);
+            acc.doc_type_read_version = acc.doc_type_read_version.or(opt(ebml_uint(EbmlId(EBML_DOC_TYPE_READ_VERSION)))(input)?.1);
+
+            Ok(())
+        })(input);
+
+    match header_result {
+        Ok((remaining, header)) => {
+            dbg!(header);
+
+            Ok(remaining)
+        },
+        Err(nom::Err::Error(EbmlError::UnexpectedElement(id, len))) => {
+            Err(DemuxerError::Misc(anyhow::anyhow!("Expected EBML header, found {id:?}")))
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn read_until_segment(input: &[u8]) -> Result<&[u8], DemuxerError> {
+    let (remaining, (id, len)) = ebml_element_header()(input)?;
+
+    let len = len.require().context("Found element with unknown size before segment")?;
+
+    if id != EbmlId(SEGMENT) {
+        let header_len = slice_dist(input, remaining);
+
+        return Err(DemuxerError::Seek(SeekFrom::Current((header_len + len) as i64)));
+    }
+
+    Ok(remaining)
+}
+
+fn read_info(input: &[u8]) -> Result<(&[u8], Movie), DemuxerError> {
+    let (remaining, (id, len)) = ebml_element_header()(input)?;
+
+    let len = len.require().context("Found element with unknown size before info")?;
+
+    if id != EbmlId(INFO) {
+        let header_len = slice_dist(input, remaining);
+
+        return Err(DemuxerError::Seek(SeekFrom::Current((header_len + len) as i64)));
+    }
+
+    ebml_master_element_fold(
+        EbmlId(INFO),
+        (),
+        |acc, input| {
+
+            Ok(())
+        });
+
+    todo!()
+    // Ok(remaining)
+}
+
+impl MatroskaDemuxer {
+    fn read_headers_internal<'a>(&mut self, input: &'a [u8]) -> Result<&'a [u8], DemuxerError> {
+        match self.state {
+            State::LookingForEbmlHeader => {
+                let remaining = read_ebml_header(input)?;
+
+                self.state = State::LookingForSegment;
+
+                Ok(remaining)
+            },
+            State::LookingForSegment => {
+                let remaining = read_until_segment(input)?;
+
+                self.state = State::ParseUntilFirstCluster;
+
+                Ok(remaining)
+            },
+            State::ParseUntilFirstCluster => {
+                todo!();
+
+                let (remaining, movie) = read_info(input)?;
+
+                // self.state = State::FoundInfo(movie);
+
+                Ok(remaining)
+            },
+            _ => {
+                todo!("never");
+            }
+        }
+    }
 }
 
 impl Demuxer2 for MatroskaDemuxer {
-    fn read_headers(&mut self, buf: &mut dyn Buffered) -> anyhow::Result<DemuxerResponse> {
-        let input = buf.data();
-        let (input, id) = ebml_vid(input)?;
-        let (input, len) = ebml_len(input)?;
+    fn read_headers(&mut self, buf: &mut dyn Buffered) -> Result<Movie, DemuxerError> {
+        loop {
+            let input = buf.data();
 
-        if id == EbmlId(EBML_HEADER) {
-
-        } else {
-            match len {
-                EbmlLength::Known(len) => {
-                    return Ok(DemuxerResponse::Seek(SeekFrom::Current(len as i64)));
-                }
-                EbmlLength::Unknown(_) => {
-                    anyhow::bail!("Unknown length when looking for movie");
-                }
-            }
+            let remaining = self.read_headers_internal(input)?;
+            buf.consume(slice_dist(input, remaining) as usize);
         }
-
-        todo!()
     }
 
-    fn read_packet(&mut self, buf: &mut dyn crate::io::Buffered) -> anyhow::Result<crate::format::DemuxerResponse> {
+    fn read_packet(&mut self, buf: &mut dyn crate::io::Buffered) -> Result<Packet, DemuxerError> {
         todo!()
     }
 }
 
 impl MatroskaDemuxer {
+    pub fn new2() -> Self {
+        MatroskaDemuxer {
+            io: Io::null(),
+            streams: Vec::new(),
+            timebase: Fraction::new(1, 1),
+            current_cluster_ts: 0,
+            state: State::LookingForEbmlHeader,
+        }
+    }
     pub fn new(io: Io) -> Self {
         MatroskaDemuxer {
             io,
             streams: Vec::new(),
             timebase: Fraction::new(1, 1),
             current_cluster_ts: 0,
+            state: State::LookingForEbmlHeader,
         }
     }
 
@@ -422,4 +534,15 @@ async fn be16(io: &mut Io) -> Result<i16, MkvError> {
     io.read_exact(&mut data).await?;
 
     Ok(i16::from_be_bytes(data))
+}
+
+fn slice_dist(a: &[u8], b: &[u8]) -> u64 {
+    let a = a.as_ptr() as u64;
+    let b = b.as_ptr() as u64;
+
+    if a > b {
+        a - b
+    } else {
+        b - a
+    }
 }

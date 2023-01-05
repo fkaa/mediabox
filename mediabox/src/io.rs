@@ -39,100 +39,12 @@ pub enum Reader {
     Seekable(Box<dyn ReadSeek>),
     Stream(Box<dyn Read>),
 }
+pub trait SyncReadSeek: std::io::Read {}
+impl<T> SyncReadSeek for T where T: std::io::Read + Seek {}
 
-#[cfg(feature = "wasm")]
-mod wasm {
-    use log::info;
-    use std::io;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-    use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncSeek, AsyncWrite, BufReader, ReadBuf};
-    use wasm_bindgen::JsCast;
-    use wasm_streams::readable::{IntoAsyncRead, ReadableStream};
-
-    macro_rules! ready {
-        ($e:expr $(,)?) => {
-            match $e {
-                std::task::Poll::Ready(t) => t,
-                std::task::Poll::Pending => return std::task::Poll::Pending,
-            }
-        };
-    }
-    #[pin_project::pin_project]
-    pub(crate) struct WasmFile {
-        file: web_sys::File,
-        position: u64,
-        #[pin]
-        blob: IntoAsyncRead<'static>,
-    }
-
-    //unsafe impl Send for WasmFile {}
-    //unsafe impl Sync for WasmFile {}
-
-    impl From<web_sys::File> for WasmFile {
-        fn from(file: web_sys::File) -> Self {
-            let blob = ReadableStream::from_raw(file.slice().unwrap().stream().unchecked_into())
-                .into_async_read();
-
-            WasmFile {
-                file,
-                position: 0,
-                blob,
-            }
-        }
-    }
-
-    impl AsyncRead for WasmFile {
-        fn poll_read(
-            self: Pin<&mut Self>,
-            cx: &mut Context<'_>,
-            buf: &mut ReadBuf,
-        ) -> Poll<io::Result<()>> {
-            use futures::io::AsyncRead;
-
-            let this = self.project();
-            let mut blob = this.blob;
-
-            let unfilled_bytes = buf.initialize_unfilled();
-            let bytes_read = ready!(blob.as_mut().poll_read(cx, unfilled_bytes))?;
-            buf.advance(bytes_read);
-
-            *this.position += bytes_read as u64;
-
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    impl AsyncSeek for WasmFile {
-        fn start_seek(mut self: Pin<&mut Self>, position: io::SeekFrom) -> io::Result<()> {
-            let new_position = match position {
-                io::SeekFrom::Start(pos) => pos,
-                io::SeekFrom::End(offset) => (self.file.size() as i64 + offset)
-                    .try_into()
-                    .unwrap_or(0u64),
-                io::SeekFrom::Current(offset) => {
-                    self.position.checked_add_signed(offset).unwrap_or(0u64)
-                }
-            };
-
-            self.as_mut().position = new_position;
-
-            Pin::into_inner(self).blob = ReadableStream::from_raw(
-                self.file
-                    .slice_with_f64(new_position as f64)
-                    .map_err(|_| io::Error::new(io::ErrorKind::Unsupported, "TODO"))?
-                    .stream()
-                    .unchecked_into(),
-            )
-            .into_async_read();
-
-            Ok(())
-        }
-
-        fn poll_complete(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-            Poll::Ready(Ok(self.position))
-        }
-    }
+pub enum SyncReader {
+    Seekable(Box<dyn SyncReadSeek>),
+    Stream(Box<dyn std::io::Read>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -195,23 +107,6 @@ impl Io {
             uri,
             writer: None,
             reader: Some(Reader::Seekable(Box::new(file))),
-        })
-    }
-}
-
-#[cfg(feature = "wasm")]
-impl Io {
-    pub async fn from_wasm_file(file: web_sys::File) -> Result<Self, IoError> {
-        let addr = format!("wasm-file://{}", urlencoding::encode(&file.name()));
-        log::info!("{}", addr);
-        let uri = Uri::parse_from(addr).map_err(|e| e.1)?;
-
-        let reader = Reader::Seekable(BufReader::new(Box::new(wasm::WasmFile::from(file))));
-
-        Ok(Io {
-            uri,
-            writer: None,
-            reader: Some(reader),
         })
     }
 }
@@ -288,6 +183,12 @@ impl Io {
         }
 
         Ok(())
+    }
+
+    pub fn into_reader(self) -> Result<Reader, IoError> {
+        let reader = self.reader.ok_or(IoError::NotReadable)?;
+
+        Ok(reader)
     }
 
     pub fn reader(&mut self) -> Result<&mut (dyn AsyncRead + Unpin), IoError> {
@@ -370,13 +271,13 @@ impl Io {
 }
 
 use std::cmp;
-use std::io;
+use std::io::{self, Seek};
 use std::iter;
 use std::iter::Iterator;
 
 /// Partial consumption buffer for any reader.
 pub struct GrowableBufferedReader {
-    inner: Reader,
+    inner: SyncReader,
     buf: Vec<u8>,
     pos: usize,
     end: usize,
@@ -386,13 +287,13 @@ pub struct GrowableBufferedReader {
 
 impl GrowableBufferedReader {
     /// Creates a new `AccReader` instance.
-    pub fn new(inner: Reader) -> GrowableBufferedReader {
+    pub fn new(inner: SyncReader) -> GrowableBufferedReader {
         GrowableBufferedReader::with_capacity(4096, inner)
     }
 
     /// Creates a new `AccReader` instance of a determined capacity
     /// for a reader.
-    pub fn with_capacity(cap: usize, inner: Reader) -> GrowableBufferedReader {
+    pub fn with_capacity(cap: usize, inner: SyncReader) -> GrowableBufferedReader {
         GrowableBufferedReader {
             inner,
             buf: iter::repeat(0).take(cap).collect::<Vec<_>>(),
@@ -400,23 +301,6 @@ impl GrowableBufferedReader {
             end: 0,
             index: 0,
         }
-    }
-
-    /// Gets a reference to the underlying reader.
-    pub fn get_ref(&self) -> &Reader {
-        &self.inner
-    }
-
-    /// Gets a mutable reference to the underlying reader.
-    pub fn get_mut(&mut self) -> &mut Reader {
-        &mut self.inner
-    }
-
-    /// Unwraps the `AccReader`, returning the underlying reader.
-    ///
-    /// Note that any leftover data in the internal buffer is lost.
-    pub fn into_inner(self) -> Reader {
-        self.inner
     }
 
     /// Resets the buffer to the current position.
@@ -446,19 +330,32 @@ impl GrowableBufferedReader {
         self.buf.resize(l, 0);
     }
 
-    pub async fn fill_buf(&mut self) -> io::Result<&[u8]> {
+    pub fn fill_buf(&mut self) -> io::Result<()> {
         if self.pos != 0 || self.end != self.buf.len() {
             self.reset_buffer_position();
 
             let read = match self.inner {
-                Reader::Stream(ref mut r) => r.read(&mut self.buf[self.end..]).await?,
-                Reader::Seekable(ref mut r) => r.read(&mut self.buf[self.end..]).await?,
+                SyncReader::Stream(ref mut r) => r.read(&mut self.buf[self.end..])?,
+                SyncReader::Seekable(ref mut r) => r.read(&mut self.buf[self.end..])?,
             };
 
             self.end += read;
         }
 
-        Ok(&self.buf[self.pos..self.end])
+        Ok(())
+    }
+}
+
+impl Seek for GrowableBufferedReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match pos {
+            SeekFrom::Start(pos) => {
+                self.inner
+            },
+            SeekFrom::End(_) => todo!(),
+            SeekFrom::Current(_) => todo!(),
+        }
+        todo!()
     }
 }
 

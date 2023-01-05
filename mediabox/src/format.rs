@@ -1,12 +1,14 @@
-use std::{cmp::Ordering, fmt::Debug, io::{SeekFrom}};
+use std::{cmp::Ordering, fmt::Debug, io::{SeekFrom}, fs::File};
 
 use async_trait::async_trait;
 
 use crate::{
-    io::{Io, GrowableBufferedReader, Buffered}, AacCodec, AudioCodec, H264Codec, MediaTrackExt, Packet, Span, Track, VideoCodec,
+    io::{Io, GrowableBufferedReader, Buffered, SyncReader}, AacCodec, AudioCodec, H264Codec, MediaTrackExt, Packet, Span, Track, VideoCodec,
 };
 
 use std::fmt::Write;
+
+use self::mkv::MatroskaDemuxer;
 
 // pub mod hls;
 pub mod mkv;
@@ -45,55 +47,79 @@ pub struct DemuxerContext {
 }
 
 impl DemuxerContext {
-    async fn read_headers(&mut self) -> anyhow::Result<Movie> {
+    pub fn open(url: &str) -> anyhow::Result<Self> {
+        let demuxer = Box::new(MatroskaDemuxer::new2());
+
+        let reader = SyncReader::Seekable(Box::new(File::open(url)?));
+        let buf = GrowableBufferedReader::new(reader);
+
+        Ok(DemuxerContext {
+            demuxer,
+            buf,
+        })
+    }
+
+    pub fn read_headers(&mut self) -> anyhow::Result<Movie> {
         loop {
-            match self.demuxer.read_headers(&mut self.buf)? {
-                DemuxerResponse::NeedMore(more) => {
+            match self.demuxer.read_headers(&mut self.buf) {
+                Ok(movie) => return Ok(movie),
+                Err(DemuxerError::NeedMore(more)) => {
+                    eprintln!("growing: {more}");
                     // TODO: grow if max capacity
                     self.buf.grow(more);
-                    self.buf.fill_buf().await?;
+                    self.buf.fill_buf()?;
                 },
-                DemuxerResponse::Seek(seek) => {
+                Err(DemuxerError::Seek(seek)) => {
+                    eprintln!("seeking: {seek:?}");
                     // self.buf.seek(seek).await?;
                     todo!()
                 },
-                DemuxerResponse::Movie(movie) => return Ok(movie),
-                DemuxerResponse::Packet(_) => unimplemented!(),
+                Err(DemuxerError::Misc(err)) => return Err(err),
             }
         }
     }
 
-    async fn read_packet(&mut self) -> anyhow::Result<Packet> {
+    pub fn read_packet(&mut self) -> anyhow::Result<Packet> {
         loop {
-            match self.demuxer.read_packet(&mut self.buf)? {
-                DemuxerResponse::NeedMore(more) => {
+            match self.demuxer.read_packet(&mut self.buf) {
+                Ok(pkt) => return Ok(pkt),
+                Err(DemuxerError::NeedMore(more)) => {
+                    // TODO: grow if max capacity
                     self.buf.grow(more);
-                    self.buf.fill_buf().await?;
+                    self.buf.fill_buf()?;
                 },
-                DemuxerResponse::Seek(seek) => {
+                Err(DemuxerError::Seek(seek)) => {
                     // self.buf.seek(seek).await?;
                     todo!()
                 },
-                DemuxerResponse::Movie(_) => unimplemented!(),
-                DemuxerResponse::Packet(packet) => return Ok(packet),
+                Err(DemuxerError::Misc(err)) => return Err(err),
             }
         }
-    }
-    fn handle_response(&mut self, response: DemuxerResponse) {
     }
 }
 
 pub trait Demuxer2 {
-    fn read_headers(&mut self, buf: &mut dyn Buffered) -> anyhow::Result<DemuxerResponse>;
-    fn read_packet(&mut self, buf: &mut dyn Buffered) -> anyhow::Result<DemuxerResponse>;
+    fn read_headers(&mut self, buf: &mut dyn Buffered) -> Result<Movie, DemuxerError>;
+    fn read_packet(&mut self, buf: &mut dyn Buffered) -> Result<Packet, DemuxerError>;
 }
 
 #[derive(Debug)]
 pub enum DemuxerResponse {
-    NeedMore(usize),
-    Seek(SeekFrom),
     Movie(Movie),
     Packet(Packet),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DemuxerError {
+    #[error("")]
+    NeedMore(usize),
+    #[error("")]
+    Seek(SeekFrom),
+
+    // TODO: Skip(usize)
+
+    #[error("{0}")]
+    Misc(#[from] anyhow::Error),
 }
 
 #[async_trait(?Send)]

@@ -9,12 +9,10 @@ use tokio::fs::File;
 async fn main() {
     env_logger::init();
 
-    let file = File::open("test.mkv").await.unwrap();
-    let _out = File::create("test.mp4").await.unwrap();
-    let mut demuxer = MatroskaDemuxer::new(Io::from_reader(Box::new(file)));
+    let mut demuxer = DemuxerContext::open("./tests/files/testsrc-h264.mkv").unwrap();
     let mut muxer = Mp4Muxer::new(Io::create_file("test.mp4").await.unwrap());
 
-    let movie = demuxer.start().await.unwrap();
+    let movie = demuxer.read_headers().unwrap();
 
     for track in &movie.tracks {
         eprintln!("#{}: {:?}", track.id, track.info);
@@ -23,7 +21,7 @@ async fn main() {
     muxer.start(movie.tracks).await.unwrap();
 
     loop {
-        let pkt = demuxer.read().await.unwrap();
+        let pkt = demuxer.read_packet().unwrap();
 
         println!("{:?}", pkt.time);
 
