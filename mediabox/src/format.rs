@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, fmt::Debug, io::{SeekFrom}, fs::File};
+use std::{cmp::Ordering, fmt::Debug, io::{SeekFrom, Seek}, fs::File};
 
 use async_trait::async_trait;
 
@@ -65,14 +65,13 @@ impl DemuxerContext {
                 Ok(movie) => return Ok(movie),
                 Err(DemuxerError::NeedMore(more)) => {
                     eprintln!("growing: {more}");
-                    // TODO: grow if max capacity
-                    self.buf.grow(more);
+                    self.buf.ensure_additional(more);
                     self.buf.fill_buf()?;
                 },
                 Err(DemuxerError::Seek(seek)) => {
                     eprintln!("seeking: {seek:?}");
-                    // self.buf.seek(seek).await?;
-                    todo!()
+
+                    self.buf.seek(seek)?;
                 },
                 Err(DemuxerError::Misc(err)) => return Err(err),
             }
@@ -84,13 +83,13 @@ impl DemuxerContext {
             match self.demuxer.read_packet(&mut self.buf) {
                 Ok(pkt) => return Ok(pkt),
                 Err(DemuxerError::NeedMore(more)) => {
-                    // TODO: grow if max capacity
-                    self.buf.grow(more);
+                    self.buf.ensure_additional(more);
                     self.buf.fill_buf()?;
                 },
                 Err(DemuxerError::Seek(seek)) => {
-                    // self.buf.seek(seek).await?;
-                    todo!()
+                    eprintln!("seeking: {seek:?}");
+
+                    self.buf.seek(seek)?;
                 },
                 Err(DemuxerError::Misc(err)) => return Err(err),
             }

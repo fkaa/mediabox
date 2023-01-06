@@ -39,12 +39,20 @@ pub enum Reader {
     Seekable(Box<dyn ReadSeek>),
     Stream(Box<dyn Read>),
 }
-pub trait SyncReadSeek: std::io::Read {}
+pub trait SyncReadSeek: std::io::Read + Seek {}
 impl<T> SyncReadSeek for T where T: std::io::Read + Seek {}
 
 pub enum SyncReader {
     Seekable(Box<dyn SyncReadSeek>),
     Stream(Box<dyn std::io::Read>),
+}
+impl Seek for SyncReader {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        match self {
+            SyncReader::Seekable(reader) => reader.seek(pos),
+            SyncReader::Stream(_) => Err(io::Error::new(io::ErrorKind::Other, "woops")),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -279,6 +287,7 @@ use std::iter::Iterator;
 pub struct GrowableBufferedReader {
     inner: SyncReader,
     buf: Vec<u8>,
+    buf_pos: usize,
     pos: usize,
     end: usize,
     // Position in the stream of the buffer's beginning
@@ -297,6 +306,7 @@ impl GrowableBufferedReader {
         GrowableBufferedReader {
             inner,
             buf: iter::repeat(0).take(cap).collect::<Vec<_>>(),
+            buf_pos: 0,
             pos: 0,
             end: 0,
             index: 0,
@@ -325,9 +335,25 @@ impl GrowableBufferedReader {
         self.end - self.pos
     }
 
-    pub fn grow(&mut self, len: usize) {
-        let l = self.buf.len() + len;
-        self.buf.resize(l, 0);
+    pub fn ensure_additional(&mut self, more: usize) {
+        let len = self.end - self.pos;
+
+        self.ensure_capacity(len + more);
+    }
+
+    pub fn ensure_capacity(&mut self, len: usize) {
+        let capacity_left = self.buf.len() - self.pos;
+
+        if capacity_left >= len {
+            return;
+        }
+
+        if len <= self.buf.len() {
+            self.reset_buffer_position();
+            return;
+        }
+
+        self.buf.resize(len, 0);
     }
 
     pub fn fill_buf(&mut self) -> io::Result<()> {
@@ -347,15 +373,33 @@ impl GrowableBufferedReader {
 }
 
 impl Seek for GrowableBufferedReader {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        match pos {
-            SeekFrom::Start(pos) => {
-                self.inner
-            },
-            SeekFrom::End(_) => todo!(),
-            SeekFrom::Current(_) => todo!(),
+    fn seek(&mut self, mut pos: SeekFrom) -> io::Result<u64> {
+        if let SeekFrom::Current(pos) = &mut pos {
+            let abs_pos = (self.buf_pos + self.pos) as i64;
+            let abs_end = (self.buf_pos + self.end) as i64;
+
+            let new_pos = abs_pos + *pos;
+
+            if new_pos >= abs_end {
+                let seek = new_pos - abs_end;
+
+                *pos = seek;
+            } else if new_pos < self.buf_pos as i64 {
+                let seek = *pos - (self.end - self.pos) as i64;
+
+                *pos = seek;
+            } else {
+                return Ok(new_pos as u64);
+            }
         }
-        todo!()
+
+        let pos = self.inner.seek(pos)?;
+
+        self.buf_pos = pos as usize;
+        self.pos = 0;
+        self.end = 0;
+        
+        Ok(pos)
     }
 }
 
@@ -378,6 +422,11 @@ impl Buffered for GrowableBufferedReader {
 mod test {
     use super::*;
     use test_case::test_case;
+
+    #[test_case(b"abc")]
+    #[test]
+    fn buffered_reader(spans: &[u8]) {
+    }
 
     #[test_case(&[b"abc"], b"abc")]
     #[test_case(&[b"a", b"b", b"c"], b"abc")]

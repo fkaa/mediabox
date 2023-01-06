@@ -132,8 +132,6 @@ impl MatroskaDemuxer {
                 Ok(remaining)
             },
             State::ParseUntilFirstCluster => {
-                todo!();
-
                 let (remaining, movie) = read_info(input)?;
 
                 // self.state = State::FoundInfo(movie);
