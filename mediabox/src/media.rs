@@ -3,26 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::{
-    codec::{
-        nal::{frame_nal_units, BitstreamFraming},
-        SubtitleInfo,
-    },
+    codec::{nal::BitstreamFraming, SubtitleInfo},
     Fraction, Span,
 };
-
-pub trait MediaTrackExt {
-    fn video(&self) -> Option<&Track>;
-    fn audio(&self) -> Option<&Track>;
-}
-
-impl<T: AsRef<[Track]>> MediaTrackExt for T {
-    fn video(&self) -> Option<&Track> {
-        self.as_ref().iter().find(|s| s.info.video().is_some())
-    }
-    fn audio(&self) -> Option<&Track> {
-        self.as_ref().iter().find(|s| s.info.audio().is_some())
-    }
-}
 
 #[derive(Clone)]
 pub struct H264Codec {
@@ -52,12 +35,14 @@ pub enum VideoCodec {
 pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
-    pub codec: VideoCodec,
+    pub codec_private: Span,
+    pub bitstream_format: BitstreamFraming,
+    // pub codec: VideoCodec,
 }
 
 impl VideoInfo {
     pub fn parameter_sets(&self) -> Option<Vec<u8>> {
-        let VideoCodec::H264(H264Codec { sps, pps, .. }) = &self.codec;
+        /*let VideoCodec::H264(H264Codec { sps, pps, .. }) = &self.codec;
 
         let nuts = [sps.clone(), pps.clone()];
 
@@ -65,13 +50,16 @@ impl VideoInfo {
             frame_nal_units(&nuts, BitstreamFraming::FourByteLength)
                 .to_bytes()
                 .to_vec(),
-        )
+        )*/
+
+        None
     }
 }
 
 impl fmt::Debug for VideoInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self.codec {
+        todo!()
+        /*match &self.codec {
             VideoCodec::H264(H264Codec { sps, .. }) => {
                 use h264_reader::{
                     nal::sps::SeqParameterSet,
@@ -126,7 +114,7 @@ impl fmt::Debug for VideoInfo {
 
                 Ok(())
             }
-        }
+        }*/
     }
 }
 
@@ -153,6 +141,12 @@ impl AudioCodec {
 pub enum SoundType {
     Mono,
     Stereo,
+}
+
+impl Default for SoundType {
+    fn default() -> Self {
+        SoundType::Mono
+    }
 }
 
 impl SoundType {
@@ -191,42 +185,60 @@ impl fmt::Debug for MediaKind {
     }
 }
 
-/// Defines properties about a type of media (eg. a video or audio track)
-#[derive(Clone)]
-pub struct MediaInfo {
-    pub name: &'static str,
-    pub kind: MediaKind,
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum CodecId {
+    Unknown,
+    H264,
+    Aac,
+    WebVtt,
 }
 
-impl MediaInfo {
-    pub fn video(&self) -> Option<&VideoInfo> {
-        if let MediaKind::Video(video) = &self.kind {
-            Some(video)
-        } else {
-            None
-        }
+impl CodecId {
+    pub fn is_video(&self) -> bool {
+        use CodecId::*;
+
+        matches!(self, H264)
     }
 
-    pub fn audio(&self) -> Option<&AudioInfo> {
-        if let MediaKind::Audio(audio) = &self.kind {
-            Some(audio)
-        } else {
-            None
-        }
+    pub fn is_audio(&self) -> bool {
+        use CodecId::*;
+
+        matches!(self, Aac)
     }
 
-    pub fn subtitle(&self) -> Option<&SubtitleInfo> {
-        if let MediaKind::Subtitle(subtitle) = &self.kind {
-            Some(subtitle)
-        } else {
-            None
-        }
+    pub fn is_subtitle(&self) -> bool {
+        use CodecId::*;
+
+        matches!(self, WebVtt)
     }
+}
+
+impl Default for CodecId {
+    fn default() -> Self {
+        CodecId::Unknown
+    }
+}
+
+/// Defines properties about a type of media (eg. a video or audio track)
+#[derive(Default, Clone)]
+pub struct MediaInfo {
+    pub codec_id: CodecId,
+    pub codec_private: Span,
+
+    // video specific
+    pub width: u32,
+    pub height: u32,
+
+    // audio specific
+    pub sample_freq: u32,
+    pub channels: u32,
+    pub sound_type: SoundType,
+    // pub kind: MediaKind,
 }
 
 impl fmt::Debug for MediaInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.kind)
+        write!(f, "{:?}", self.codec_id)
     }
 }
 
@@ -246,7 +258,7 @@ impl fmt::Debug for Track {
 
 impl Track {
     pub fn is_video(&self) -> bool {
-        matches!(self.info.kind, MediaKind::Video(_))
+        self.info.codec_id.is_video()
     }
 }
 
@@ -263,7 +275,7 @@ pub struct Packet {
 
 impl Packet {
     pub fn guess_duration(&self) -> Option<MediaDuration> {
-        match &self.track.info.kind {
+        /*match &self.track.info.kind {
             MediaKind::Video(VideoInfo {
                 codec: VideoCodec::H264(H264Codec { sps, .. }),
                 ..
@@ -293,7 +305,8 @@ impl Packet {
                 })
             }
             _ => None,
-        }
+        }*/
+        None
     }
 }
 
@@ -304,7 +317,7 @@ impl fmt::Debug for Packet {
             .field("key", &self.key)
             .field(
                 "track",
-                &format_args!("{} ({})", self.track.id, self.track.info.name),
+                &format_args!("{} ({:?})", self.track.id, self.track.info.codec_id),
             )
             .field("buffer", &format_args!("[{}]", self.buffer.len()))
             .finish()

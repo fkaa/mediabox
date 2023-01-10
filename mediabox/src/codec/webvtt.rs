@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, io::Write, sync::Arc};
 
-use crate::{encoder, Fraction, MediaInfo, MediaKind, Track};
+use crate::{encoder, CodecId, Fraction, MediaInfo, Track};
 
 use super::*;
 
@@ -43,8 +43,8 @@ impl Encoder for WebVttEncoder {
         let track = Track {
             id: 0,
             info: Arc::new(MediaInfo {
-                name: "webvtt",
-                kind: MediaKind::Subtitle(info),
+                codec_id: CodecId::WebVtt,
+                ..Default::default()
             }),
             timebase: WEBVTT_TIMEBASE,
         };

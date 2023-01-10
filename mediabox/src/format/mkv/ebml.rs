@@ -1,16 +1,13 @@
-use std::{str::Utf8Error, error::Error};
+use std::str::Utf8Error;
 
 use bytes::{BufMut, Bytes, BytesMut};
-use nom::{IResult, Needed, Parser, combinator::{flat_map, verify, opt}, sequence::pair, error::ParseError, bytes::streaming::take, bytes::complete::tag, branch::{permutation, alt, Alt}};
+use nom::{bytes::streaming::take, error::ParseError, sequence::pair, IResult, Needed, Parser};
 
-use crate::{
-    io::Io,
-    Span, format::{DemuxerResponse, DemuxerError},
-};
+use crate::{format::DemuxerError, io::Io, Span};
 
 use super::*;
 
-#[derive(Eq, PartialEq)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct EbmlId(pub u64);
 
 impl std::fmt::Debug for EbmlId {
@@ -131,12 +128,12 @@ impl EbmlElement {
     }
 }
 
-pub fn write_ebml<F: FnOnce(&mut BytesMut) -> R, R: Into<Span>>(id: u64, func: F) -> Span {
+pub fn write_ebml<F: FnOnce(&mut BytesMut) -> R, R: Into<Span>>(id: EbmlId, func: F) -> Span {
     let mut content = BytesMut::new();
     let span = func(&mut content);
 
     let mut buf = BytesMut::with_capacity(8);
-    EbmlId(id).write(&mut buf);
+    id.write(&mut buf);
     EbmlLength::Known(content.len() as u64).write(&mut buf);
 
     [Span::from(buf.freeze()), Span::from(content.freeze())]
@@ -145,8 +142,8 @@ pub fn write_ebml<F: FnOnce(&mut BytesMut) -> R, R: Into<Span>>(id: u64, func: F
 }
 
 fn t() {
-    write_ebml(EBML_HEADER as u64, |buf| {
-        write_ebml(EBML_DOC_TYPE as u64, |buf| write_vstr(buf, "matroska"))
+    write_ebml(EBML_HEADER, |buf| {
+        write_ebml(EBML_DOC_TYPE, |buf| write_vstr(buf, "matroska"))
     });
 }
 
@@ -265,9 +262,7 @@ pub async fn uint_elem(io: &mut Io) -> Result<u64, MkvError> {
 
     let mut bytes = [0u8; 7];
     if len > 0 {
-        reader
-            .read_exact(&mut bytes[..len as usize])
-            .await?;
+        reader.read_exact(&mut bytes[..len as usize]).await?;
     }
 
     let mut value = 0;
@@ -284,8 +279,8 @@ pub async fn uint_elem(io: &mut Io) -> Result<u64, MkvError> {
 pub enum EbmlError {
     #[error("element")]
     Element(&'static str),
-    #[error("Unexpected EBML element {0:?}")]
-    UnexpectedElement(EbmlId, EbmlLength),
+    #[error("Unexpected EBML element. Expected {0:?} but found {1:?} ({2:?}.")]
+    UnexpectedElement(EbmlId, EbmlId, EbmlLength),
     #[error("Expected known size, but was unknown")]
     UnknownSize,
     #[error("{0}")]
@@ -313,7 +308,7 @@ impl From<nom::Err<EbmlError>> for DemuxerError {
         match value {
             nom::Err::Incomplete(Needed::Size(sz)) => DemuxerError::NeedMore(sz.into()),
             nom::Err::Incomplete(Needed::Unknown) => DemuxerError::NeedMore(4096),
-            nom::Err::Error(_) => todo!(),
+            nom::Err::Error(e) => DemuxerError::Misc(e.into()),
             nom::Err::Failure(_) => todo!(),
         }
     }
@@ -371,7 +366,7 @@ pub fn ebml_len(input: &[u8]) -> IResult<&[u8], EbmlLength, EbmlError> {
     }
 
     let length = if value == 1 << (7 * len) {
-        EbmlLength::Unknown(len as u8) 
+        EbmlLength::Unknown(len as u8)
     } else {
         EbmlLength::Known(value)
     };
@@ -411,30 +406,38 @@ pub fn ebml_int(input: &[u8], size: usize) -> IResult<&[u8], u64, EbmlError> {
         return Err(nom::Err::Incomplete(Needed::new(size - input.len())));
     }
 
-    let value = input[..size].iter().fold(0, |acc, b| (acc << 8) | *b as u64);
+    let value = input[..size]
+        .iter()
+        .fold(0, |acc, b| (acc << 8) | *b as u64);
 
     Ok((&input[size..], value))
 }
 
 pub fn ebml_master_element_fold<'a, F, Q>(
     expected_id: EbmlId,
-    mut default: Q,
+    default: Q,
     mut parser: F,
-) -> impl FnOnce(&'a [u8]) -> IResult<&'a [u8], Q, EbmlError>
-    where
-        F: FnMut(&mut Q, &'a [u8]) -> Result<(), nom::Err<EbmlError>>,
+) -> impl FnMut(&'a [u8]) -> IResult<&'a [u8], Q, EbmlError>
+where
+    Q: Clone,
+    F: FnMut(&mut Q, &'a [u8]) -> Result<(), nom::Err<EbmlError>>,
 {
     move |input| {
+        let mut default = default.clone();
         let (input, (id, len)) = ebml_element_header()(input)?;
 
         eprintln!("id={id:?}, len={len:?}");
 
         if id != expected_id {
-            return Err(nom::Err::Error(EbmlError::UnexpectedElement(id, len)));
+            return Err(nom::Err::Error(EbmlError::UnexpectedElement(
+                expected_id,
+                id,
+                len,
+            )));
         }
 
         let len = len.require()?;
-        
+
         let (remaining, mut input) = take(len)(input)?;
 
         while !input.is_empty() {
@@ -447,33 +450,36 @@ pub fn ebml_master_element_fold<'a, F, Q>(
             input = &remaining[len..];
         }
 
-
         Ok((remaining, default))
     }
 }
 
-pub fn ebml_element<'a, P, F, T>(expected_id: EbmlId, parser: F) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], T, EbmlError>
-    where
-        P: Parser<&'a [u8], T, EbmlError>,
-        F: Fn(EbmlLength) -> P,
+pub fn ebml_element<'a, P, F, T>(
+    expected_id: EbmlId,
+    parser: F,
+) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], T, EbmlError>
+where
+    P: Parser<&'a [u8], T, EbmlError>,
+    F: Fn(EbmlLength) -> P,
 {
     move |input| {
         let (input, (id, length)) = ebml_element_header()(input)?;
 
         if id != expected_id {
-            return Err(nom::Err::Error(EbmlError::UnexpectedElement(id, length)));
+            return Err(nom::Err::Error(EbmlError::UnexpectedElement(
+                expected_id,
+                id,
+                length,
+            )));
         }
 
         parser(length).parse(input)
     }
 }
 
-pub fn ebml_element_header<'a>() -> impl Fn(&'a [u8]) -> IResult<&'a [u8], (EbmlId, EbmlLength), EbmlError> {
-    move |input| {
-        pair(
-            ebml_vid,
-            ebml_len)(input)
-    }
+pub fn ebml_element_header<'a>(
+) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], (EbmlId, EbmlLength), EbmlError> {
+    move |input| pair(ebml_vid, ebml_len)(input)
 }
 
 pub fn ebml_uint<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], u64, EbmlError> {
@@ -492,18 +498,33 @@ pub fn ebml_uint<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], u64, 
     })
 }
 
+pub fn ebml_float<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], f64, EbmlError> {
+    ebml_element(id, |size| {
+        move |input: &'a [u8]| {
+            let size = size.require()?;
+
+            let (remaining, bytes) = take(size)(input)?;
+
+            let value = if bytes.len() >= 8 {
+                f64::from_be_bytes(bytes[..8].try_into().unwrap())
+            } else if bytes.len() >= 4 {
+                f32::from_be_bytes(bytes[..4].try_into().unwrap()) as f64
+            } else {
+                0f64
+            };
+
+            Ok((remaining, value))
+        }
+    })
+}
+
 #[test]
 fn nom() {
     let a = b"1122334455";
 
+    let b: IResult<_, _> = permutation((tag("11"), opt(tag("33"))))(&a[..]);
 
-    let b: IResult<_, _> = permutation((
-            tag("11"),
-            opt(tag("33")),
-        ))(&a[..]);
-
-    dbg!(b
-        );
+    dbg!(b);
 
     panic!("");
 }
@@ -531,10 +552,21 @@ pub fn ebml_str<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a st
 
             let (remaining, bytes) = take(size)(input)?;
 
-            let value = std::str::from_utf8(bytes)
-                .map_err(EbmlError::InvalidString)?;
+            let value = std::str::from_utf8(bytes).map_err(EbmlError::InvalidString)?;
 
             Ok((remaining, value))
+        }
+    })
+}
+
+pub fn ebml_bin<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a [u8], EbmlError> {
+    ebml_element(id, |size| {
+        move |input: &'a [u8]| {
+            let size = size.require()?;
+
+            let (remaining, bytes) = take(size)(input)?;
+
+            Ok((remaining, bytes))
         }
     })
 }
@@ -621,7 +653,7 @@ pub fn write_vid(buf: &mut BytesMut, id: u64) {
 fn write_int_elem(buf: &mut BytesMut, mut value: i64) {
     while value > 0 {
         buf.put_u8((value & 0xff) as u8);
-    
+
         value >>= 8;
     }
 }
@@ -629,7 +661,7 @@ fn write_int_elem(buf: &mut BytesMut, mut value: i64) {
 fn write_uint_elem(buf: &mut BytesMut, mut value: u64) {
     while value > 0 {
         buf.put_u8((value & 0xff) as u8);
-    
+
         value >>= 8;
     }
 }
@@ -639,7 +671,7 @@ fn int_element_bytes_required(value: i64) -> u8 {
         return 1;
     }
 
-    (value.ilog2() as u8 ) / 8
+    (value.ilog2() as u8) / 8
 }
 
 fn uint_element_bytes_required(value: u64) -> u8 {
@@ -647,7 +679,7 @@ fn uint_element_bytes_required(value: u64) -> u8 {
         return 1;
     }
 
-    (value.ilog2() as u8 ) / 8
+    (value.ilog2() as u8) / 8
 }
 
 fn vint_bytes_required(value: u64) -> u64 {

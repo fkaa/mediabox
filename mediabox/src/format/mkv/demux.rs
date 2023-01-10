@@ -1,44 +1,54 @@
 use aho_corasick::AhoCorasick;
 use anyhow::Context;
 use async_trait::async_trait;
-use h264_reader::avcc::AvcDecoderConfigurationRecord;
+
 use log::*;
-use nom::{branch::alt, combinator::opt};
+use nom::combinator::opt;
 
-use std::{sync::Arc, io::SeekFrom};
+use std::io::SeekFrom;
 
-use crate::{ebml, format::{Demuxer2, DemuxerResponse, DemuxerError}, io::Buffered};
+use crate::{
+    format::{Demuxer2, DemuxerError},
+    io::Buffered,
+};
 
 use super::ebml::*;
 use super::*;
 
 use crate::{
-    codec::{nal::get_codec_from_mp4, AssCodec, SubtitleCodec, SubtitleInfo},
     demuxer,
     format::{Demuxer, Movie, ProbeResult},
     io::Io,
-    AacCodec, AudioCodec, AudioInfo, Fraction, MediaInfo, MediaKind, MediaTime, Packet, SoundType,
-    Track,
+    Fraction, MediaInfo, Packet, Track,
 };
 
 demuxer!("mkv", MatroskaDemuxer::create, MatroskaDemuxer::probe);
 
 pub struct MatroskaDemuxer {
-    io: Io,
-    streams: Vec<Track>,
+    movie: Movie,
     timebase: Fraction,
     current_cluster_ts: u64,
     state: State,
 }
 
+#[derive(Eq, PartialEq)]
 enum State {
     LookingForEbmlHeader,
     LookingForSegment,
-    ParseUntilFirstCluster,
+    ParseUntilFirstCluster { tracks: bool, info: bool },
+    ParseClusters,
+}
+
+macro_rules! element {
+    ($dst: expr, $ebml: expr, $input: expr) => {
+        if $dst.is_none() {
+            *$dst = opt($ebml)($input)?.1;
+        }
+    };
 }
 
 fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
-    #[derive(Debug, Default)]
+    #[derive(Clone, Debug, Default)]
     struct EbmlHeader<'a> {
         version: Option<u64>,
         read_version: Option<u64>,
@@ -49,17 +59,32 @@ fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
         doc_type_read_version: Option<u64>,
     }
 
-    let header_result = ebml_master_element_fold(
-        EbmlId(EBML_HEADER),
-        EbmlHeader::default(),
-        |acc, input| {
-            acc.version = acc.version.or(opt(ebml_uint(EbmlId(EBML_VERSION)))(input)?.1);
-            acc.read_version = acc.read_version.or(opt(ebml_uint(EbmlId(EBML_READ_VERSION)))(input)?.1);
-            acc.max_id_length = acc.max_id_length.or(opt(ebml_uint(EbmlId(EBML_DOC_MAX_ID_LENGTH)))(input)?.1);
-            acc.max_size_length = acc.max_size_length.or(opt(ebml_uint(EbmlId(EBML_DOC_MAX_SIZE_LENGTH)))(input)?.1);
-            acc.doc_type = acc.doc_type.or(opt(ebml_str(EbmlId(EBML_DOC_TYPE)))(input)?.1);
-            acc.doc_type_version = acc.doc_type_version.or(opt(ebml_uint(EbmlId(EBML_DOC_TYPE_VERSION)))(input)?.1);
-            acc.doc_type_read_version = acc.doc_type_read_version.or(opt(ebml_uint(EbmlId(EBML_DOC_TYPE_READ_VERSION)))(input)?.1);
+    dbg!(input.len());
+    let header_result =
+        ebml_master_element_fold(EBML_HEADER, EbmlHeader::default(), |acc, input| {
+            element!(&mut acc.version, ebml_uint(EBML_VERSION), input);
+            element!(&mut acc.read_version, ebml_uint(EBML_READ_VERSION), input);
+            element!(
+                &mut acc.max_id_length,
+                ebml_uint(EBML_DOC_MAX_ID_LENGTH),
+                input
+            );
+            element!(
+                &mut acc.max_size_length,
+                ebml_uint(EBML_DOC_MAX_SIZE_LENGTH),
+                input
+            );
+            element!(&mut acc.doc_type, ebml_str(EBML_DOC_TYPE), input);
+            element!(
+                &mut acc.doc_type_version,
+                ebml_uint(EBML_DOC_TYPE_VERSION),
+                input
+            );
+            element!(
+                &mut acc.doc_type_read_version,
+                ebml_uint(EBML_DOC_TYPE_READ_VERSION),
+                input
+            );
 
             Ok(())
         })(input);
@@ -69,10 +94,10 @@ fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
             dbg!(header);
 
             Ok(remaining)
-        },
-        Err(nom::Err::Error(EbmlError::UnexpectedElement(id, len))) => {
-            Err(DemuxerError::Misc(anyhow::anyhow!("Expected EBML header, found {id:?}")))
         }
+        Err(nom::Err::Error(EbmlError::UnexpectedElement(expected, id, len))) => Err(
+            DemuxerError::Misc(anyhow::anyhow!("Expected EBML header, found {id:?}")),
+        ),
         Err(e) => Err(e.into()),
     }
 }
@@ -80,38 +105,135 @@ fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
 fn read_until_segment(input: &[u8]) -> Result<&[u8], DemuxerError> {
     let (remaining, (id, len)) = ebml_element_header()(input)?;
 
-    let len = len.require().context("Found element with unknown size before segment")?;
+    let len = len
+        .require()
+        .context("Found element with unknown size before segment")?;
 
-    if id != EbmlId(SEGMENT) {
+    if id != SEGMENT {
         let header_len = slice_dist(input, remaining);
 
-        return Err(DemuxerError::Seek(SeekFrom::Current((header_len + len) as i64)));
+        return Err(DemuxerError::Seek(SeekFrom::Current(
+            (header_len + len) as i64,
+        )));
     }
 
     Ok(remaining)
 }
 
-fn read_info(input: &[u8]) -> Result<(&[u8], Movie), DemuxerError> {
-    let (remaining, (id, len)) = ebml_element_header()(input)?;
+const TRACK_TYPE_VIDEO: u64 = 1;
+const TRACK_TYPE_AUDIO: u64 = 2;
+const TRACK_TYPE_SUBTITLE: u64 = 17;
 
-    let len = len.require().context("Found element with unknown size before info")?;
+fn convert_track(track: &MkvTrack) -> anyhow::Result<(u64, MediaInfo)> {
+    let number = mand(track.number, TRACK_NUMBER)?;
+    let ty = mand(track.ty, TRACK_TYPE)?;
+    let codec_id = mand(track.number, CODEC_ID)?;
 
-    if id != EbmlId(INFO) {
-        let header_len = slice_dist(input, remaining);
+    let mut info = MediaInfo::default();
 
-        return Err(DemuxerError::Seek(SeekFrom::Current((header_len + len) as i64)));
+    match ty {
+        self::TRACK_TYPE_VIDEO => fill_video_info(&mut info, track)?,
+        self::TRACK_TYPE_AUDIO => fill_audio_info(&mut info, track)?,
+        self::TRACK_TYPE_SUBTITLE => fill_subtitle_info(&mut info, track)?,
+        _ => anyhow::bail!("Unsupported track type {ty}"),
     }
 
-    ebml_master_element_fold(
-        EbmlId(INFO),
-        (),
+    Ok((number, info))
+}
+
+fn fill_video_info(info: &mut MediaInfo, track: &MkvTrack) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn fill_audio_info(info: &mut MediaInfo, track: &MkvTrack) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn fill_subtitle_info(info: &mut MediaInfo, track: &MkvTrack) -> anyhow::Result<()> {
+    Ok(())
+}
+
+enum MkvTrackType {
+    Video,
+    Audio,
+    Subtitle,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MkvTrack<'a> {
+    number: Option<u64>,
+    uid: Option<u64>,
+    ty: Option<u64>,
+    codec_id: Option<&'a str>,
+    codec_private: Option<&'a [u8]>,
+    audio: Option<MkvAudio>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MkvInfo {
+    scale: Option<u64>,
+}
+
+fn parse_info(input: &[u8]) -> Result<(&[u8], MkvInfo), DemuxerError> {
+    Ok(ebml_master_element_fold(
+        INFO,
+        MkvInfo::default(),
         |acc, input| {
+            element!(&mut acc.scale, ebml_uint(TIMESTAMP_SCALE), input);
 
             Ok(())
-        });
+        },
+    )(input)?)
+}
 
-    todo!()
-    // Ok(remaining)
+fn parse_tracks(input: &[u8]) -> Result<(&[u8], Vec<MkvTrack>), DemuxerError> {
+    Ok(ebml_master_element_fold(
+        TRACKS,
+        Vec::new(),
+        |acc, input| {
+            if let Ok(track) = parse_track(input) {
+                acc.push(track);
+            }
+
+            Ok(())
+        },
+    )(input)?)
+}
+
+#[derive(Clone, Debug, Default)]
+struct MkvAudio {
+    sampling_frequency: Option<f64>,
+    channels: Option<u64>,
+    bit_depth: Option<u64>,
+}
+
+fn parse_track(input: &[u8]) -> Result<MkvTrack, DemuxerError> {
+    Ok(
+        ebml_master_element_fold(TRACK_ENTRY, MkvTrack::default(), |acc, input| {
+            element!(&mut acc.number, ebml_uint(TRACK_NUMBER), input);
+            element!(&mut acc.uid, ebml_uint(TRACK_UID), input);
+            element!(&mut acc.ty, ebml_uint(TRACK_TYPE), input);
+            element!(&mut acc.codec_id, ebml_str(CODEC_ID), input);
+            element!(&mut acc.codec_private, ebml_bin(CODEC_PRIVATE), input);
+            element!(
+                &mut acc.audio,
+                ebml_master_element_fold(AUDIO, MkvAudio::default(), |acc, input| {
+                    element!(
+                        &mut acc.sampling_frequency,
+                        ebml_float(SAMPLING_FREQUENCY),
+                        input
+                    );
+                    element!(&mut acc.channels, ebml_uint(CHANNELS), input);
+                    element!(&mut acc.bit_depth, ebml_uint(BIT_DEPTH), input);
+                    Ok(())
+                }),
+                input
+            );
+
+            Ok(())
+        })(input)?
+        .1,
+    )
 }
 
 impl MatroskaDemuxer {
@@ -123,26 +245,93 @@ impl MatroskaDemuxer {
                 self.state = State::LookingForSegment;
 
                 Ok(remaining)
-            },
+            }
             State::LookingForSegment => {
                 let remaining = read_until_segment(input)?;
 
-                self.state = State::ParseUntilFirstCluster;
+                self.state = State::ParseUntilFirstCluster { tracks: false, info: false };
 
                 Ok(remaining)
-            },
-            State::ParseUntilFirstCluster => {
-                let (remaining, movie) = read_info(input)?;
+            }
+            State::ParseUntilFirstCluster { tracks, info } => {
 
-                // self.state = State::FoundInfo(movie);
+                let (remaining, id) = self.read_segment_elements(input)?;
+
+                let tracks = tracks || id == TRACKS;
+                let info = info || id == INFO;
+
+                if tracks && info {
+                    self.state = State::ParseClusters;
+                } else {
+                    self.state = State::ParseUntilFirstCluster { tracks, info };
+                }
 
                 Ok(remaining)
-            },
-            _ => {
-                todo!("never");
+            }
+            State::ParseClusters => {
+                todo!("shouldnt come here")
             }
         }
     }
+
+    fn read_segment_elements<'a, 'b>(
+        &'b mut self,
+        input: &'a [u8],
+    ) -> Result<(&'a [u8], EbmlId), DemuxerError> {
+        let (remaining, (id, len)) = ebml_element_header()(input)?;
+
+        let len = len
+            .require()
+            .context("Found element with unknown size before info")?;
+
+        match id {
+            self::INFO => {
+                let (remaining, info) = parse_info(input)?;
+
+                let scale = info.scale.unwrap_or(1000000);
+
+                self.timebase = Fraction::new(1, scale as u32);
+
+                return Ok((remaining, INFO));
+            }
+            self::TRACKS => {
+                let (remaining, tracks) = parse_tracks(input)?;
+
+                convert_tracks(self.timebase.clone(), &mut self.movie, &tracks)?;
+
+                return Ok((remaining, TRACKS));
+            }
+
+            _ => {
+                let header_len = slice_dist(input, remaining);
+
+                return Err(DemuxerError::Seek(SeekFrom::Current(
+                    (header_len + len) as i64,
+                )));
+            }
+        }
+    }
+}
+
+fn convert_tracks(
+    timebase: Fraction,
+    movie: &mut Movie,
+    mkv_tracks: &[MkvTrack],
+) -> anyhow::Result<()> {
+    for track in mkv_tracks {
+        match convert_track(track) {
+            Ok((id, info)) => movie.tracks.push(Track {
+                id: id as u32,
+                info: info.into(),
+                timebase: timebase.clone(),
+            }),
+            Err(e) => {
+                warn!("Ignoring track: {e}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 impl Demuxer2 for MatroskaDemuxer {
@@ -152,6 +341,10 @@ impl Demuxer2 for MatroskaDemuxer {
 
             let remaining = self.read_headers_internal(input)?;
             buf.consume(slice_dist(input, remaining) as usize);
+
+            if self.state == State::ParseClusters {
+                return Ok(self.movie.clone());
+            }
         }
     }
 
@@ -163,73 +356,17 @@ impl Demuxer2 for MatroskaDemuxer {
 impl MatroskaDemuxer {
     pub fn new2() -> Self {
         MatroskaDemuxer {
-            io: Io::null(),
-            streams: Vec::new(),
+            movie: Movie::default(),
             timebase: Fraction::new(1, 1),
             current_cluster_ts: 0,
             state: State::LookingForEbmlHeader,
         }
     }
     pub fn new(io: Io) -> Self {
-        MatroskaDemuxer {
-            io,
-            streams: Vec::new(),
-            timebase: Fraction::new(1, 1),
-            current_cluster_ts: 0,
-            state: State::LookingForEbmlHeader,
-        }
+        todo!()
     }
 
-    async fn parse_ebml_header(&mut self) -> Result<(), MkvError> {
-        let (_, id) = vid(&mut self.io).await?;
-        let (_, size) = vint(&mut self.io).await?;
-
-        if id != EBML_HEADER {
-            return Err(MkvError::UnexpectedId(EBML_HEADER, id));
-        }
-
-        ebml!(&mut self.io, size,
-            (self::EBML_DOC_TYPE, size) => {
-                let doc_type = vstr(&mut self.io, size).await?;
-
-                debug!("DocType: {doc_type}");
-            },
-            (self::EBML_DOC_TYPE_VERSION, size) => {
-                let version = vu(&mut self.io, size).await?;
-
-                debug!("DocTypeVersion: {version}");
-            },
-            (self::EBML_DOC_TYPE_READ_VERSION, size) => {
-                let version = vu(&mut self.io, size).await?;
-
-                debug!("DocTypeReadVersion: {version}");
-            }
-        );
-
-        Ok(())
-    }
-
-    async fn find_tracks(&mut self) -> Result<(), MkvError> {
-        let (_, id) = vid(&mut self.io).await?;
-        let (_, size) = vint(&mut self.io).await?;
-
-        if id != SEGMENT {
-            return Err(MkvError::UnexpectedId(SEGMENT, id));
-        }
-
-        ebml!(&mut self.io, size,
-            (self::INFO, size) => {
-                self.parse_segment_info(size).await?;
-            },
-            (self::TRACKS, size) => {
-                self.parse_track_entries(size).await?;
-                break;
-            }
-        );
-
-        Ok(())
-    }
-
+    /*
     async fn parse_segment_info(&mut self, size: u64) -> Result<(), MkvError> {
         ebml!(&mut self.io, size,
             (self::TIMESTAMP_SCALE, size) => {
@@ -416,7 +553,7 @@ impl MatroskaDemuxer {
             key,
             buffer: buffer.into(),
         }))
-    }
+    }*/
 }
 
 struct Audio {
@@ -428,7 +565,7 @@ struct Audio {
 #[async_trait(?Send)]
 impl Demuxer for MatroskaDemuxer {
     async fn start(&mut self) -> anyhow::Result<Movie> {
-        self.parse_ebml_header()
+        /*self.parse_ebml_header()
             .await
             .context("Parsing EBML header")?;
         self.find_tracks().await.context("Finding tracks")?;
@@ -436,11 +573,12 @@ impl Demuxer for MatroskaDemuxer {
         Ok(Movie {
             tracks: self.streams.clone(),
             attachments: Vec::new(),
-        })
+        })*/
+        todo!()
     }
 
     async fn read(&mut self) -> anyhow::Result<Packet> {
-        loop {
+        /*loop {
             let (_, id) = vid(&mut self.io).await?;
             let (_, size) = vint(&mut self.io).await?;
 
@@ -481,7 +619,8 @@ impl Demuxer for MatroskaDemuxer {
                     self.io.skip(size).await?;
                 }
             }
-        }
+        }*/
+        todo!()
     }
 
     async fn stop(&mut self) -> anyhow::Result<()> {
@@ -494,10 +633,10 @@ impl Demuxer for MatroskaDemuxer {
 
     fn probe(data: &[u8]) -> ProbeResult {
         let patterns = &[
-            &EBML_HEADER.to_be_bytes()[..],
+            &EBML_HEADER.0.to_be_bytes()[..],
             b"matroska",
-            &SEGMENT.to_be_bytes()[..],
-            &CLUSTER.to_be_bytes()[..],
+            &SEGMENT.0.to_be_bytes()[..],
+            &CLUSTER.0.to_be_bytes()[..],
         ];
         let ac = AhoCorasick::new(patterns);
 
@@ -514,7 +653,7 @@ impl Demuxer for MatroskaDemuxer {
     }
 }
 
-fn mand<T>(value: Option<T>, id: u64) -> Result<T, MkvError> {
+fn mand<T>(value: Option<T>, id: EbmlId) -> Result<T, MkvError> {
     value.ok_or(MkvError::MissingElement(id))
 }
 

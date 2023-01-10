@@ -30,6 +30,12 @@ pub enum Span {
     Static(&'static [u8]),
 }
 
+impl Default for Span {
+    fn default() -> Self {
+        Span::Static(&[])
+    }
+}
+
 impl FromIterator<Span> for Span {
     fn from_iter<I: IntoIterator<Item = Span>>(iter: I) -> Self {
         Span::Many(iter.into_iter().collect())

@@ -26,8 +26,8 @@ use io::Io;
 
 #[derive(Default)]
 pub struct MediaContext {
-    decoder_meta: HashMap<String, DecoderMetadata>,
-    encoder_meta: HashMap<String, EncoderMetadata>,
+    decoder_meta: HashMap<CodecId, DecoderMetadata>,
+    encoder_meta: HashMap<CodecId, EncoderMetadata>,
     demuxer_meta: HashMap<String, DemuxerMetadata>,
     muxer_meta: HashMap<String, MuxerMetadata>,
 }
@@ -48,9 +48,9 @@ impl MediaContext {
     pub fn find_decoder_for_track(&self, track: &Track) -> anyhow::Result<Box<dyn Decoder>> {
         let mut decoder = self
             .decoder_meta
-            .get(track.info.name)
+            .get(&track.info.codec_id)
             .map(|m| m.create())
-            .ok_or_else(|| anyhow::anyhow!("No decoder found for {:?}", track.info.name))?;
+            .ok_or_else(|| anyhow::anyhow!("No decoder found for {:?}", track.info.codec_id))?;
 
         decoder.start(&track.info)?;
 
@@ -59,10 +59,10 @@ impl MediaContext {
 
     pub fn find_encoder_with_params(
         &self,
-        name: &str,
+        name: CodecId,
         info: &MediaInfo,
     ) -> anyhow::Result<Box<dyn Encoder>> {
-        let mut encoder = self.encoder_meta.get(name).map(|m| m.create());
+        let mut encoder = self.encoder_meta.get(&name).map(|m| m.create());
 
         if let Some(ref mut encoder) = &mut encoder {
             encoder.start(CodecDescription::Subtitle(SubtitleDescription::default()))?;

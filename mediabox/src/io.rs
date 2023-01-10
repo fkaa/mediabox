@@ -380,7 +380,7 @@ impl Seek for GrowableBufferedReader {
 
             let new_pos = abs_pos + *pos;
 
-            if new_pos >= abs_end {
+            if new_pos > abs_end {
                 let seek = new_pos - abs_end;
 
                 *pos = seek;
@@ -389,6 +389,7 @@ impl Seek for GrowableBufferedReader {
 
                 *pos = seek;
             } else {
+                self.pos = (new_pos - self.buf_pos as i64) as usize;
                 return Ok(new_pos as u64);
             }
         }
@@ -398,7 +399,7 @@ impl Seek for GrowableBufferedReader {
         self.buf_pos = pos as usize;
         self.pos = 0;
         self.end = 0;
-        
+
         Ok(pos)
     }
 }
@@ -423,24 +424,88 @@ mod test {
     use super::*;
     use test_case::test_case;
 
-    #[test_case(b"abc")]
-    #[test]
-    fn buffered_reader(spans: &[u8]) {
+    use std::io::Cursor;
+
+    #[derive(Debug)]
+    enum Op<'a> {
+        Assert(&'a [u8]),
+        Seek(SeekFrom),
+        Fill,
+        Consume(usize),
     }
 
-    #[test_case(&[b"abc"], b"abc")]
-    #[test_case(&[b"a", b"b", b"c"], b"abc")]
-    #[tokio::test]
-    async fn io_write(spans: &[&[u8]], expected: &[u8]) {
-        let buf: Vec<u8> = Vec::new();
+    #[test_case(
+        5,
+        b"0123456789",
+        &[
+            Op::Fill,
+            Op::Assert(b"01234"),
+            Op::Seek(SeekFrom::Current(1)),
+            Op::Assert(b"1234"),
+            Op::Fill,
+            Op::Assert(b"12345"),
+            Op::Seek(SeekFrom::Current(5)),
+            Op::Assert(b""),
+            Op::Fill,
+            Op::Assert(b"6789"),
+            Op::Seek(SeekFrom::Current(-2)),
+            Op::Assert(b""),
+            Op::Fill,
+            Op::Assert(b"45678"),
+        ]
+    )]
+    #[test_case(
+        10,
+        b"abc",
+        &[Op::Assert(b""),]
+    )]
+    #[test_case(
+        10,
+        b"abc",
+        &[
+            Op::Fill,
+            Op::Assert(b"abc"),
+            Op::Seek(SeekFrom::Current(1)),
+            Op::Assert(b"bc"),
+            Op::Seek(SeekFrom::Current(1)),
+            Op::Assert(b"c"),
+            Op::Seek(SeekFrom::Current(1)),
+            Op::Assert(b""),
+            Op::Seek(SeekFrom::Current(-3)),
+            Op::Assert(b"abc"),
+        ]
+    )]
+    #[test_case(
+        10,
+        b"abc",
+        &[
+            Op::Fill,
+            Op::Assert(b"abc"),
+            Op::Consume(1),
+            Op::Assert(b"bc"),
+            Op::Consume(1),
+            Op::Assert(b"c"),
+            Op::Consume(1),
+            Op::Assert(b""),
+        ]
+    )]
+    #[test]
+    fn buffered_reader(capacity: usize, data: &'static [u8], ops: &[Op]) {
+        let cur = Cursor::new(data);
+        let reader = SyncReader::Seekable(Box::new(cur));
+        let mut buf = GrowableBufferedReader::with_capacity(capacity, reader);
 
-        let mut io = Io::from_stream(Box::new(buf));
-        for span in spans {
-            io.write(span).await.unwrap();
+        for op in ops {
+            match op {
+                Op::Assert(data) => assert_eq!(buf.data(), *data),
+                Op::Seek(seek) => {
+                    buf.seek(*seek).unwrap();
+                }
+                Op::Fill => buf.fill_buf().unwrap(),
+                Op::Consume(c) => {
+                    buf.consume(*c);
+                }
+            }
         }
-
-        let buf: Box<Vec<u8>> = io.into_writer().unwrap();
-
-        assert_eq!(expected, *buf);
     }
 }

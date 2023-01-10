@@ -1,9 +1,15 @@
-use std::{cmp::Ordering, fmt::Debug, io::{SeekFrom, Seek}, fs::File};
+use std::{
+    cmp::Ordering,
+    fmt::Debug,
+    fs::File,
+    io::{Seek, SeekFrom},
+};
 
 use async_trait::async_trait;
 
 use crate::{
-    io::{Io, GrowableBufferedReader, Buffered, SyncReader}, AacCodec, AudioCodec, H264Codec, MediaTrackExt, Packet, Span, Track, VideoCodec,
+    io::{Buffered, GrowableBufferedReader, Io, SyncReader},
+    Packet, Span, Track,
 };
 
 use std::fmt::Write;
@@ -12,11 +18,11 @@ use self::mkv::MatroskaDemuxer;
 
 // pub mod hls;
 pub mod mkv;
-pub mod mp4;
+// pub mod mp4;
 
-#[cfg(feature = "rtmp")]
-pub mod rtmp;
-pub mod webvtt;
+// #[cfg(feature = "rtmp")]
+// pub mod rtmp;
+// pub mod webvtt;
 
 /// Registers a demuxer with mediabox
 #[macro_export]
@@ -53,10 +59,7 @@ impl DemuxerContext {
         let reader = SyncReader::Seekable(Box::new(File::open(url)?));
         let buf = GrowableBufferedReader::new(reader);
 
-        Ok(DemuxerContext {
-            demuxer,
-            buf,
-        })
+        Ok(DemuxerContext { demuxer, buf })
     }
 
     pub fn read_headers(&mut self) -> anyhow::Result<Movie> {
@@ -67,12 +70,12 @@ impl DemuxerContext {
                     eprintln!("growing: {more}");
                     self.buf.ensure_additional(more);
                     self.buf.fill_buf()?;
-                },
+                }
                 Err(DemuxerError::Seek(seek)) => {
                     eprintln!("seeking: {seek:?}");
 
                     self.buf.seek(seek)?;
-                },
+                }
                 Err(DemuxerError::Misc(err)) => return Err(err),
             }
         }
@@ -85,12 +88,12 @@ impl DemuxerContext {
                 Err(DemuxerError::NeedMore(more)) => {
                     self.buf.ensure_additional(more);
                     self.buf.fill_buf()?;
-                },
+                }
                 Err(DemuxerError::Seek(seek)) => {
                     eprintln!("seeking: {seek:?}");
 
                     self.buf.seek(seek)?;
-                },
+                }
                 Err(DemuxerError::Misc(err)) => return Err(err),
             }
         }
@@ -116,7 +119,6 @@ pub enum DemuxerError {
     Seek(SeekFrom),
 
     // TODO: Skip(usize)
-
     #[error("{0}")]
     Misc(#[from] anyhow::Error),
 }
@@ -217,14 +219,14 @@ impl PartialOrd for ProbeResult {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone)]
 pub struct Movie {
     pub tracks: Vec<Track>,
     pub attachments: Vec<Attachment>,
 }
 
 impl Movie {
-    pub fn codec_string(&self) -> Option<String> {
+    /*pub fn codec_string(&self) -> Option<String> {
         let video = self.tracks.video()?;
         let VideoCodec::H264(H264Codec {
             profile_indication,
@@ -245,11 +247,11 @@ impl Movie {
         }
 
         Some(codec)
-    }
+    }*/
 
-    pub fn subtitles(&self) -> impl Iterator<Item = &Track> + '_ {
+    /*pub fn subtitles(&self) -> impl Iterator<Item = &Track> + '_ {
         self.tracks.iter().filter(|t| t.info.subtitle().is_some())
-    }
+    }*/
 }
 
 #[derive(Clone)]
