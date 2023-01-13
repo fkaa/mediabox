@@ -9,7 +9,7 @@ use crate::{
         Muxer,
     },
     io::Io,
-    muxer, OwnedPacket, Packet, Track,
+    muxer, OwnedPacket, Track,
 };
 
 use super::*;

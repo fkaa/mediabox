@@ -1,3 +1,5 @@
+use std::io::SeekFrom;
+
 use async_trait::async_trait;
 
 use crate::{io::Io, OwnedPacket, Packet, Span, Track};
@@ -24,9 +26,24 @@ pub trait MuxerContext {
 }
 
 pub trait Muxer2 {
-    fn start(&mut self, movie: Movie) -> anyhow::Result<()>;
-    fn write(&mut self, packet: Packet) -> anyhow::Result<()>;
-    fn stop(&mut self) -> anyhow::Result<()>;
+    fn start(&mut self, movie: Movie) -> Result<Span, MuxerError>;
+    fn write(&mut self, packet: Packet) -> Result<Span, MuxerError>;
+    fn stop(&mut self) -> Result<Span, MuxerError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum MuxerError {
+    #[error("")]
+    NeedMore,
+    #[error("")]
+    Seek(SeekFrom),
+
+    #[error("End of stream")]
+    EndOfStream,
+
+    // TODO: Skip(usize)
+    #[error("{0}")]
+    Misc(#[from] anyhow::Error),
 }
 
 /// A trait for exposing functionality related to muxing together multiple streams into a container

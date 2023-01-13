@@ -5,9 +5,9 @@ use mediabox::io::*;
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
 fn main() {
-    env_logger::init();
-
     let _profiler = dhat::Profiler::new_heap();
+
+    env_logger::init();
 
     let mut demuxer = DemuxerContext::open("./tests/files/testsrc-h264.mkv").unwrap();
     // let mut muxer = MuxerContext::open("").unwrap();
@@ -16,13 +16,13 @@ fn main() {
     let movie = demuxer.read_headers().unwrap();
 
     for track in &movie.tracks {
-        eprintln!("#{}: {:?}", track.id, track.info);
+        eprintln!(">  {}: {:?}", track.id, track.info);
     }
 
     // muxer.start(movie.tracks).await.unwrap();
 
     while let Some(pkt) = demuxer.read_packet().unwrap() {
-        println!("{:?}", pkt.time);
+        // println!("{:?}", pkt.time);
 
         // muxer.write(pkt).await.unwrap();
     }

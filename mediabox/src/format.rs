@@ -6,14 +6,13 @@ use std::{
 };
 
 use async_trait::async_trait;
+use tracing::debug;
 
 use crate::{
     buffer::{Buffered, GrowableBufferedReader},
     io::{Io, SyncReader},
     Packet, Span, Track,
 };
-
-use std::fmt::Write;
 
 use self::mkv::MatroskaDemuxer;
 
@@ -65,17 +64,14 @@ impl DemuxerContext {
         loop {
             let data = self.reader.data(&self.buf);
 
-            std::thread::sleep_ms(50);
-
             match self.demuxer.read_headers(data, &mut self.reader) {
                 Ok(movie) => return Ok(movie),
                 Err(DemuxerError::NeedMore(more)) => {
-                    dbg!(self.buf.len());
                     self.reader.ensure_additional(&mut self.buf, more);
                     self.reader.fill_buf(&mut self.buf)?;
                 }
                 Err(DemuxerError::Seek(seek)) => {
-                    eprintln!("seeking: {seek:?}");
+                    debug!("seeking: {seek:?}");
 
                     self.reader.seek(seek)?;
                 }
@@ -108,7 +104,7 @@ impl DemuxerContext {
                     self.reader.fill_buf(&mut self.buf)?;
                 }
                 DemuxerError::Seek(seek) => {
-                    eprintln!("seeking: {seek:?}");
+                    debug!("seeking: {seek:?}");
 
                     self.reader.seek(seek)?;
                 }

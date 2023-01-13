@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Display};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -106,19 +106,21 @@ impl AudioCodec {
 
 #[derive(Clone, Debug)]
 pub enum SoundType {
+    Unknown,
     Mono,
     Stereo,
 }
 
 impl Default for SoundType {
     fn default() -> Self {
-        SoundType::Mono
+        SoundType::Unknown
     }
 }
 
 impl SoundType {
     pub fn channel_count(&self) -> u16 {
         match self {
+            SoundType::Unknown => 0,
             SoundType::Mono => 1,
             SoundType::Stereo => 2,
         }
@@ -161,6 +163,24 @@ pub enum CodecId {
 }
 
 impl CodecId {
+    pub fn name(&self) -> &'static str {
+        match self {
+            CodecId::Unknown => "unknown",
+            CodecId::H264 => "H.264",
+            CodecId::Aac => "AAC",
+            CodecId::WebVtt => "WebVTT",
+            _ => "unknown",
+        }
+    }
+}
+
+impl Display for CodecId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl CodecId {
     pub fn is_video(&self) -> bool {
         use CodecId::*;
 
@@ -198,14 +218,31 @@ pub struct MediaInfo {
 
     // audio specific
     pub sample_freq: u32,
-    pub channels: u32,
     pub sound_type: SoundType,
     // pub kind: MediaKind,
 }
 
 impl fmt::Debug for MediaInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self.codec_id)
+        if self.codec_id.is_video() {
+            write!(f, "{} {}x{}", self.codec_id, self.width, self.height)?;
+
+            return Ok(())
+        }
+
+        if self.codec_id.is_audio() {
+            write!(f, "{} {}hz {:?}", self.codec_id, self.sample_freq, self.sound_type)?;
+
+            return Ok(())
+        }
+
+        if self.codec_id.is_subtitle() {
+            write!(f, "{}", self.codec_id)?;
+
+            return Ok(())
+        }
+
+        write!(f, "{}", self.codec_id)
     }
 }
 
