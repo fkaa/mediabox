@@ -9,7 +9,7 @@ use crate::{
         Muxer,
     },
     io::Io,
-    muxer, Packet, Track,
+    muxer, OwnedPacket, Packet, Track,
 };
 
 use super::*;
@@ -65,7 +65,7 @@ impl Muxer for MatroskaMuxer {
         Ok(())
     }
 
-    async fn write(&mut self, packet: Packet) -> anyhow::Result<()> {
+    async fn write(&mut self, packet: OwnedPacket) -> anyhow::Result<()> {
         Ok(())
     }
 

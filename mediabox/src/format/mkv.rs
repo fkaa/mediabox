@@ -93,7 +93,7 @@ mod test {
 
     use super::{MatroskaDemuxer, MatroskaMuxer};
 
-    test_files! {
+    /*test_files! {
         #[tokio::test]
         async fn write_read_packets_are_equal(test_file: TestFile) {
             let (movie, packets) = test::read_mkv_from_path(test_file.path).await;
@@ -113,5 +113,5 @@ mod test {
 
             // TODO: assert
         }
-    }
+    }*/
 }

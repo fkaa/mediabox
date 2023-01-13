@@ -1,13 +1,13 @@
-use mediabox::format::mkv::*;
-// use mediabox::format::mp4::*;
 use mediabox::format::*;
 use mediabox::io::*;
 
-use tokio::fs::File;
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     env_logger::init();
+
+    let _profiler = dhat::Profiler::new_heap();
 
     let mut demuxer = DemuxerContext::open("./tests/files/testsrc-h264.mkv").unwrap();
     // let mut muxer = MuxerContext::open("").unwrap();
@@ -22,7 +22,7 @@ async fn main() {
     // muxer.start(movie.tracks).await.unwrap();
 
     while let Some(pkt) = demuxer.read_packet().unwrap() {
-        // println!("{:?}", pkt.time);
+        println!("{:?}", pkt.time);
 
         // muxer.write(pkt).await.unwrap();
     }

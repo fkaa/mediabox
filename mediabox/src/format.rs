@@ -8,13 +8,18 @@ use std::{
 use async_trait::async_trait;
 
 use crate::{
-    io::{Buffered, GrowableBufferedReader, Io, SyncReader},
+    buffer::{Buffered, GrowableBufferedReader},
+    io::{Io, SyncReader},
     Packet, Span, Track,
 };
 
 use std::fmt::Write;
 
 use self::mkv::MatroskaDemuxer;
+
+mod mux;
+
+pub use mux::*;
 
 // pub mod hls;
 pub mod mkv;
@@ -36,45 +41,43 @@ macro_rules! demuxer {
     };
 }
 
-/// Registers a muxer with mediabox
-#[macro_export]
-macro_rules! muxer {
-    ($name:literal, $create:expr) => {
-        pub const MUXER_META: $crate::format::MuxerMetadata = $crate::format::MuxerMetadata {
-            name: $name,
-            create: $create,
-        };
-    };
-}
-
 pub struct DemuxerContext {
     demuxer: Box<dyn Demuxer2>,
-    buf: GrowableBufferedReader,
+    reader: GrowableBufferedReader,
+    buf: Vec<u8>,
 }
 
 impl DemuxerContext {
     pub fn open(url: &str) -> anyhow::Result<Self> {
-        let demuxer = Box::new(MatroskaDemuxer::new2());
+        let demuxer = MatroskaDemuxer::create();
 
         let reader = SyncReader::Seekable(Box::new(File::open(url)?));
-        let buf = GrowableBufferedReader::new(reader);
+        let (reader, buf) = GrowableBufferedReader::new(reader);
 
-        Ok(DemuxerContext { demuxer, buf })
+        Ok(DemuxerContext {
+            demuxer,
+            reader,
+            buf,
+        })
     }
 
     pub fn read_headers(&mut self) -> anyhow::Result<Movie> {
         loop {
-            match self.demuxer.read_headers(&mut self.buf) {
+            let data = self.reader.data(&self.buf);
+
+            std::thread::sleep_ms(50);
+
+            match self.demuxer.read_headers(data, &mut self.reader) {
                 Ok(movie) => return Ok(movie),
                 Err(DemuxerError::NeedMore(more)) => {
-                    eprintln!("growing: {more}");
-                    self.buf.ensure_additional(more);
-                    self.buf.fill_buf()?;
+                    dbg!(self.buf.len());
+                    self.reader.ensure_additional(&mut self.buf, more);
+                    self.reader.fill_buf(&mut self.buf)?;
                 }
                 Err(DemuxerError::Seek(seek)) => {
                     eprintln!("seeking: {seek:?}");
 
-                    self.buf.seek(seek)?;
+                    self.reader.seek(seek)?;
                 }
                 Err(DemuxerError::Misc(err)) => return Err(err),
                 Err(err @ DemuxerError::EndOfStream) => return Err(err.into()),
@@ -82,35 +85,65 @@ impl DemuxerContext {
         }
     }
 
-    pub fn read_packet(&mut self) -> anyhow::Result<Option<Packet>> {
+    pub fn read_packet<'a>(&'a mut self) -> anyhow::Result<Option<Packet<'a>>> {
         loop {
-            match self.demuxer.read_packet(&mut self.buf) {
-                Ok(pkt) => return Ok(pkt),
-                Err(DemuxerError::NeedMore(more)) => {
-                    self.buf.ensure_additional(more);
-                    self.buf.fill_buf()?;
+            let err = {
+                let buf = unsafe { std::mem::transmute::<&[u8], &[u8]>(&self.buf) };
+                let data = self.reader.data(buf);
+
+                let result = self.demuxer.read_packet(data, &mut self.reader);
+
+                match result {
+                    Ok(pkt) => return Ok(pkt),
+                    Err(e) => e,
                 }
-                Err(DemuxerError::Seek(seek)) => {
+            };
+
+            match err {
+                DemuxerError::EndOfStream => return Ok(None),
+                DemuxerError::Misc(err) => return Err(err),
+
+                DemuxerError::NeedMore(more) => {
+                    self.reader.ensure_additional(&mut self.buf, more);
+                    self.reader.fill_buf(&mut self.buf)?;
+                }
+                DemuxerError::Seek(seek) => {
                     eprintln!("seeking: {seek:?}");
 
-                    self.buf.seek(seek)?;
+                    self.reader.seek(seek)?;
                 }
-                Err(DemuxerError::Misc(err)) => return Err(err),
-                Err(DemuxerError::EndOfStream) => return Ok(None),
             }
         }
     }
 }
 
 pub trait Demuxer2 {
-    fn read_headers(&mut self, buf: &mut dyn Buffered) -> Result<Movie, DemuxerError>;
-    fn read_packet(&mut self, buf: &mut dyn Buffered) -> Result<Option<Packet>, DemuxerError>;
+    fn read_headers(&mut self, data: &[u8], buf: &mut dyn Buffered) -> Result<Movie, DemuxerError>;
+    fn read_packet<'a>(
+        &mut self,
+        data: &'a [u8],
+        buf: &mut dyn Buffered,
+    ) -> Result<Option<Packet<'a>>, DemuxerError>;
+
+    fn create() -> Box<dyn Demuxer2>
+    where
+        Self: Default + 'static,
+    {
+        Box::<Self>::default()
+    }
+
+    fn probe(data: &[u8]) -> ProbeResult
+    where
+        Self: Sized,
+    {
+        ProbeResult::Unsure
+    }
 }
 
 #[derive(Debug)]
-pub enum DemuxerResponse {
+pub enum DemuxerResponse<'a> {
     Movie(Movie),
-    Packet(Packet),
+    Packet(Packet<'a>),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -146,58 +179,21 @@ pub trait Demuxer {
     }
 }
 
-/// A trait for exposing functionality related to muxing together multiple streams into a container
-/// format.
-#[async_trait]
-pub trait Muxer: Send {
-    /// Starts the muxer with the given tracks.
-    async fn start(&mut self, tracks: Vec<Track>) -> anyhow::Result<()>;
-
-    /// Writes a packet to the muxer.
-    ///
-    /// Note that this does not ensure something will be written to the output, as it may buffer
-    /// packets internally in order to write its output correctly.
-    async fn write(&mut self, packet: Packet) -> anyhow::Result<()>;
-
-    /// Stops the muxer. This will flush any buffered packets and finalize the output if
-    /// appropriate.
-    async fn stop(&mut self) -> anyhow::Result<()>;
-
-    fn into_io(self) -> Io;
-}
-
 #[derive(Clone)]
 pub struct DemuxerMetadata {
     pub name: &'static str,
-    create: fn(Io) -> Box<dyn Demuxer>,
+    create: fn() -> Box<dyn Demuxer2>,
     probe: fn(&[u8]) -> ProbeResult,
 }
 
 impl DemuxerMetadata {
-    pub fn create(&self, io: Io) -> Box<dyn Demuxer> {
-        (self.create)(io)
+    pub fn create(&self) -> Box<dyn Demuxer2> {
+        (self.create)()
     }
 
     pub fn probe(&self, data: &[u8]) -> ProbeResult {
         (self.probe)(data)
     }
-}
-
-#[derive(Clone)]
-pub struct MuxerMetadata {
-    name: &'static str,
-    create: fn(Io) -> Box<dyn Muxer>,
-}
-
-impl MuxerMetadata {
-    pub fn create(&self, io: Io) -> Box<dyn Muxer> {
-        (self.create)(io)
-    }
-}
-
-/// A muxer that can handle splitting up the output into multiple segments.
-pub struct SegmentMuxer {
-    muxer: Box<dyn Muxer>,
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -263,7 +259,7 @@ impl Movie {
 pub struct Attachment {
     pub name: String,
     pub mime: String,
-    pub data: Span,
+    pub data: Span<'static>,
 }
 
 impl Debug for Attachment {

@@ -102,7 +102,7 @@ pub fn parse_bitstream(bitstream: Span, source: BitstreamFraming) -> Vec<Span> {
 }
 
 /// Frames NAL units with a given start code before each NAL.
-fn frame_nal_units_with_start_codes(nal_units: &[Span], codes: &'static [u8]) -> Span {
+fn frame_nal_units_with_start_codes<'a>(nal_units: &[Span<'a>], codes: &'static [u8]) -> Span<'a> {
     let mut spans = Vec::new();
 
     for nal in nal_units {
@@ -114,10 +114,10 @@ fn frame_nal_units_with_start_codes(nal_units: &[Span], codes: &'static [u8]) ->
 }
 
 /// Frames NAL units with a length prefix before each NAL.
-fn frame_nal_units_with_length<const N: usize, F: Fn(usize) -> [u8; N]>(
-    nal_units: &[Span],
+fn frame_nal_units_with_length<'a, const N: usize, F: Fn(usize) -> [u8; N]>(
+    nal_units: &[Span<'a>],
     func: F,
-) -> Span {
+) -> Span<'a> {
     let mut spans = Vec::new();
 
     for nal in nal_units {
@@ -132,7 +132,7 @@ fn frame_nal_units_with_length<const N: usize, F: Fn(usize) -> [u8; N]>(
 /// Frame the given NAL units with the specified [BitstreamFraming].
 ///
 /// The NAL units are assumed to have no prefix.
-pub fn frame_nal_units(nal_units: &[Span], target: BitstreamFraming) -> Span {
+pub fn frame_nal_units<'a>(nal_units: &[Span<'a>], target: BitstreamFraming) -> Span<'a> {
     match target {
         BitstreamFraming::TwoByteLength => {
             frame_nal_units_with_length(nal_units, |len| (len as u16).to_be_bytes())

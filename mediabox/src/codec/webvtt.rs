@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, io::Write, sync::Arc};
 
-use crate::{encoder, CodecId, Fraction, MediaInfo, Track};
+use crate::{encoder, CodecId, Fraction, MediaInfo, OwnedPacket, Track};
 
 use super::*;
 
@@ -10,7 +10,7 @@ encoder!("webvtt", WebVttEncoder::create);
 
 pub struct WebVttEncoder {
     track: Option<Track>,
-    queue: VecDeque<Packet>,
+    queue: VecDeque<OwnedPacket>,
     cue_index: usize,
 }
 

@@ -14,6 +14,7 @@ mod test;
 pub mod media;
 pub mod span;
 
+pub mod buffer;
 pub mod codec;
 pub mod format;
 pub mod io;
@@ -117,7 +118,7 @@ impl PacketTranscoder {
     // TODO: implement some queue and sort output on DTS
     pub async fn process<F: FnMut(Packet) + Send + 'static>(
         &mut self,
-        pkt: Packet,
+        pkt: OwnedPacket,
         mut func: F,
     ) -> anyhow::Result<()> {
         let track_id = pkt.track.id;

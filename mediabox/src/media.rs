@@ -7,51 +7,18 @@ use crate::{
     Fraction, Span,
 };
 
-#[derive(Clone)]
-pub struct H264Codec {
-    /// Specifies the NAL unit prefix for all NAL units.
-    pub bitstream_format: BitstreamFraming,
-
-    pub profile_indication: u8,
-    pub profile_compatibility: u8,
-    pub level_indication: u8,
-
-    /// The sequence parameter set data. This must be stored with emulation bytes if neceessary
-    /// *and* with a NAL unit header.
-    pub sps: Span,
-    /// The picture parameter set data. This must be stored with emulation bytes if neceessary
-    /// *and* with a NAL unit header.
-    pub pps: Span,
-}
-
-/// Information about a specific video codec
-#[derive(Clone)]
-pub enum VideoCodec {
-    H264(H264Codec),
-}
-
 /// Information about video media
 #[derive(Clone)]
 pub struct VideoInfo {
     pub width: u32,
     pub height: u32,
-    pub codec_private: Span,
+    pub codec_private: Span<'static>,
     pub bitstream_format: BitstreamFraming,
     // pub codec: VideoCodec,
 }
 
 impl VideoInfo {
     pub fn parameter_sets(&self) -> Option<Vec<u8>> {
-        /*let VideoCodec::H264(H264Codec { sps, pps, .. }) = &self.codec;
-
-        let nuts = [sps.clone(), pps.clone()];
-
-        Some(
-            frame_nal_units(&nuts, BitstreamFraming::FourByteLength)
-                .to_bytes()
-                .to_vec(),
-        )*/
-
         None
     }
 }
@@ -223,7 +190,7 @@ impl Default for CodecId {
 #[derive(Default, Clone)]
 pub struct MediaInfo {
     pub codec_id: CodecId,
-    pub codec_private: Span,
+    pub codec_private: Span<'static>,
 
     // video specific
     pub width: u32,
@@ -266,14 +233,16 @@ impl Track {
 ///
 /// A packet contains timestamped opaque data for a given track.
 #[derive(Clone)]
-pub struct Packet {
+pub struct Packet<'a> {
     pub time: MediaTime,
     pub key: bool,
     pub track: Track,
-    pub buffer: Span,
+    pub buffer: Span<'a>,
 }
 
-impl Packet {
+pub type OwnedPacket = Packet<'static>;
+
+impl<'a> Packet<'a> {
     pub fn guess_duration(&self) -> Option<MediaDuration> {
         /*match &self.track.info.kind {
             MediaKind::Video(VideoInfo {
@@ -310,7 +279,7 @@ impl Packet {
     }
 }
 
-impl fmt::Debug for Packet {
+impl<'a> fmt::Debug for Packet<'a> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Packet")
             .field("time", &self.time)

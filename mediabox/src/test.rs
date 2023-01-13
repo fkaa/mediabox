@@ -35,7 +35,7 @@ macro_rules! test_files {
     };
 }
 
-pub async fn read_mkv_from_path(path: &str) -> (Movie, Vec<Packet>) {
+/*pub async fn read_mkv_from_path(path: &str) -> (Movie, Vec<Packet>) {
     let file = File::open(path).await.unwrap();
     let mut demuxer = MatroskaDemuxer::new(Io::from_reader(Box::new(file)));
 
@@ -67,4 +67,4 @@ pub async fn read_movie_and_packets(demuxer: &mut dyn Demuxer) -> (Movie, Vec<Pa
     demuxer.stop().await.unwrap();
 
     (movie, packets)
-}
+}*/

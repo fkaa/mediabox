@@ -8,7 +8,10 @@ use anyhow::Context;
 use downcast::{downcast, Any};
 use fluent_uri::Uri;
 
-use std::{io::SeekFrom, path::Path};
+use std::{
+    io::{self, Seek, SeekFrom},
+    path::Path,
+};
 
 use crate::Span;
 
@@ -157,21 +160,22 @@ impl Io {
         }
     }
 
-    pub async fn write_span(&mut self, span: Span) -> Result<(), IoError> {
+    pub async fn write_span(&mut self, span: Span<'static>) -> Result<(), IoError> {
         use tokio::io::AsyncWriteExt;
 
         let writer = self.writer.as_mut().ok_or(IoError::NotWriteable)?;
+        let spans = span.to_byte_spans();
 
         match writer {
             Writer::Seekable(writer) => {
                 // TODO: replace with write_vectored
-                for span in span.to_byte_spans() {
+                for span in spans {
                     writer.write_all(&span[..]).await?
                 }
             }
             Writer::Stream(writer) => {
                 // TODO: replace with write_vectored
-                for span in span.to_byte_spans() {
+                for span in spans {
                     writer.write_all(&span[..]).await?
                 }
             }
@@ -275,239 +279,5 @@ impl Io {
         };
 
         Ok(writer)
-    }
-}
-
-use std::cmp;
-use std::io::{self, Seek};
-use std::iter;
-use std::iter::Iterator;
-
-/// Partial consumption buffer for any reader.
-pub struct GrowableBufferedReader {
-    inner: SyncReader,
-    buf: Vec<u8>,
-    buf_pos: usize,
-    pos: usize,
-    end: usize,
-    // Position in the stream of the buffer's beginning
-    index: usize,
-}
-
-impl GrowableBufferedReader {
-    /// Creates a new `AccReader` instance.
-    pub fn new(inner: SyncReader) -> GrowableBufferedReader {
-        GrowableBufferedReader::with_capacity(4096, inner)
-    }
-
-    /// Creates a new `AccReader` instance of a determined capacity
-    /// for a reader.
-    pub fn with_capacity(cap: usize, inner: SyncReader) -> GrowableBufferedReader {
-        GrowableBufferedReader {
-            inner,
-            buf: iter::repeat(0).take(cap).collect::<Vec<_>>(),
-            buf_pos: 0,
-            pos: 0,
-            end: 0,
-            index: 0,
-        }
-    }
-
-    /// Resets the buffer to the current position.
-    ///
-    /// All data before the current position is lost.
-    pub fn reset_buffer_position(&mut self) {
-        if self.end - self.pos > 0 {
-            self.buf.copy_within(self.pos..self.end, 0);
-        }
-        
-        self.buf_pos += self.pos;
-        self.end -= self.pos;
-        self.pos = 0;
-    }
-
-    /// Returns buffer data.
-    pub fn current_slice(&self) -> &[u8] {
-        &self.buf[self.pos..self.end]
-    }
-
-    /// Returns buffer capacity.
-    pub fn capacity(&self) -> usize {
-        self.end - self.pos
-    }
-
-    pub fn ensure_additional(&mut self, more: usize) {
-        let len = self.end - self.pos;
-
-        self.ensure_capacity(len + more);
-    }
-
-    pub fn ensure_capacity(&mut self, len: usize) {
-        let capacity_left = self.buf.len() - self.pos;
-
-        if capacity_left >= len {
-            return;
-        }
-
-        if len <= self.buf.len() {
-            self.reset_buffer_position();
-            return;
-        }
-
-        self.buf.resize(len, 0);
-    }
-
-    pub fn fill_buf(&mut self) -> io::Result<()> {
-        if self.pos != 0 || self.end != self.buf.len() {
-            self.reset_buffer_position();
-
-            let read = match self.inner {
-                SyncReader::Stream(ref mut r) => r.read(&mut self.buf[self.end..])?,
-                SyncReader::Seekable(ref mut r) => r.read(&mut self.buf[self.end..])?,
-            };
-
-            self.end += read;
-        }
-
-        Ok(())
-    }
-}
-
-impl Seek for GrowableBufferedReader {
-    fn seek(&mut self, mut pos: SeekFrom) -> io::Result<u64> {
-        if let SeekFrom::Current(pos) = &mut pos {
-            let abs_pos = (self.buf_pos + self.pos) as i64;
-            let abs_end = (self.buf_pos + self.end) as i64;
-
-            let new_pos = abs_pos + *pos;
-
-            if new_pos > abs_end {
-                let seek = new_pos - abs_end;
-
-                *pos = seek;
-            } else if new_pos < self.buf_pos as i64 {
-                let seek = *pos - (self.end - self.pos) as i64;
-
-                *pos = seek;
-            } else {
-                self.pos = (new_pos - self.buf_pos as i64) as usize;
-                return Ok(new_pos as u64);
-            }
-        }
-
-        let pos = self.inner.seek(pos)?;
-
-        self.buf_pos = pos as usize;
-        self.pos = 0;
-        self.end = 0;
-
-        Ok(pos)
-    }
-}
-
-pub trait Buffered {
-    fn data(&self) -> &[u8];
-    fn consume(&mut self, len: usize);
-}
-
-impl Buffered for GrowableBufferedReader {
-    fn data(&self) -> &[u8] {
-        &self.buf[self.pos..self.end]
-    }
-    fn consume(&mut self, amt: usize) {
-        self.pos = cmp::min(self.pos + amt, self.end);
-        // dbg!(self.buf_pos, self.pos);
-        self.index += amt;
-    }
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-    use test_case::test_case;
-
-    use std::io::Cursor;
-
-    #[derive(Debug)]
-    enum Op<'a> {
-        Assert(&'a [u8]),
-        Seek(SeekFrom),
-        Fill,
-        Consume(usize),
-    }
-
-    #[test_case(
-        5,
-        b"0123456789",
-        &[
-            Op::Fill,
-            Op::Assert(b"01234"),
-            Op::Seek(SeekFrom::Current(1)),
-            Op::Assert(b"1234"),
-            Op::Fill,
-            Op::Assert(b"12345"),
-            Op::Seek(SeekFrom::Current(5)),
-            Op::Assert(b""),
-            Op::Fill,
-            Op::Assert(b"6789"),
-            Op::Seek(SeekFrom::Current(-2)),
-            Op::Assert(b""),
-            Op::Fill,
-            Op::Assert(b"45678"),
-        ]
-    )]
-    #[test_case(
-        10,
-        b"abc",
-        &[Op::Assert(b""),]
-    )]
-    #[test_case(
-        10,
-        b"abc",
-        &[
-            Op::Fill,
-            Op::Assert(b"abc"),
-            Op::Seek(SeekFrom::Current(1)),
-            Op::Assert(b"bc"),
-            Op::Seek(SeekFrom::Current(1)),
-            Op::Assert(b"c"),
-            Op::Seek(SeekFrom::Current(1)),
-            Op::Assert(b""),
-            Op::Seek(SeekFrom::Current(-3)),
-            Op::Assert(b"abc"),
-        ]
-    )]
-    #[test_case(
-        10,
-        b"abc",
-        &[
-            Op::Fill,
-            Op::Assert(b"abc"),
-            Op::Consume(1),
-            Op::Assert(b"bc"),
-            Op::Consume(1),
-            Op::Assert(b"c"),
-            Op::Consume(1),
-            Op::Assert(b""),
-        ]
-    )]
-    #[test]
-    fn buffered_reader(capacity: usize, data: &'static [u8], ops: &[Op]) {
-        let cur = Cursor::new(data);
-        let reader = SyncReader::Seekable(Box::new(cur));
-        let mut buf = GrowableBufferedReader::with_capacity(capacity, reader);
-
-        for op in ops {
-            match op {
-                Op::Assert(data) => assert_eq!(buf.data(), *data),
-                Op::Seek(seek) => {
-                    buf.seek(*seek).unwrap();
-                }
-                Op::Fill => buf.fill_buf().unwrap(),
-                Op::Consume(c) => {
-                    buf.consume(*c);
-                }
-            }
-        }
     }
 }
