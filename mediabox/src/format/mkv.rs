@@ -42,6 +42,7 @@ const SIMPLE_BLOCK: EbmlId = EbmlId(0xa3);
 const BLOCK_GROUP: EbmlId = EbmlId(0xa0);
 const BLOCK: EbmlId = EbmlId(0xa1);
 const BLOCK_DURATION: EbmlId = EbmlId(0x9b);
+const CUES: EbmlId = EbmlId(0x1c53bb6b);
 
 #[derive(thiserror::Error, Debug)]
 pub enum MkvError {

@@ -283,6 +283,8 @@ pub enum EbmlError {
     UnexpectedElement(EbmlId, EbmlId, EbmlLength),
     #[error("Expected known size, but was unknown")]
     UnknownSize,
+    #[error("Unsupported length size: {0}")]
+    UnsupportedSize(u8),
     #[error("{0}")]
     InvalidString(Utf8Error),
 }
@@ -384,7 +386,7 @@ pub fn ebml_vid(input: &[u8]) -> IResult<&[u8], EbmlId, EbmlError> {
     let len = 1 + extra_bytes as usize;
 
     if extra_bytes > 7 {
-        todo!()
+        return Err(EbmlError::UnsupportedSize(extra_bytes).into());
     }
 
     if input.len() < len {
@@ -426,7 +428,7 @@ where
         let mut default = default.clone();
         let (input, (id, len)) = ebml_element_header()(input)?;
 
-        eprintln!("id={id:?}, len={len:?}");
+        // eprintln!("id={id:?}, len={len:?}");
 
         if id != expected_id {
             return Err(nom::Err::Error(EbmlError::UnexpectedElement(
@@ -442,7 +444,7 @@ where
 
         while !input.is_empty() {
             let (remaining, (id, len)) = ebml_element_header()(input)?;
-            eprintln!("> id={id:?}, len={len:?}");
+            // eprintln!("> id={id:?}, len={len:?}");
             let len = len.require()? as usize;
 
             parser(&mut default, input)?;

@@ -77,11 +77,12 @@ impl DemuxerContext {
                     self.buf.seek(seek)?;
                 }
                 Err(DemuxerError::Misc(err)) => return Err(err),
+                Err(err @ DemuxerError::EndOfStream) => return Err(err.into()),
             }
         }
     }
 
-    pub fn read_packet(&mut self) -> anyhow::Result<Packet> {
+    pub fn read_packet(&mut self) -> anyhow::Result<Option<Packet>> {
         loop {
             match self.demuxer.read_packet(&mut self.buf) {
                 Ok(pkt) => return Ok(pkt),
@@ -95,6 +96,7 @@ impl DemuxerContext {
                     self.buf.seek(seek)?;
                 }
                 Err(DemuxerError::Misc(err)) => return Err(err),
+                Err(DemuxerError::EndOfStream) => return Ok(None),
             }
         }
     }
@@ -102,7 +104,7 @@ impl DemuxerContext {
 
 pub trait Demuxer2 {
     fn read_headers(&mut self, buf: &mut dyn Buffered) -> Result<Movie, DemuxerError>;
-    fn read_packet(&mut self, buf: &mut dyn Buffered) -> Result<Packet, DemuxerError>;
+    fn read_packet(&mut self, buf: &mut dyn Buffered) -> Result<Option<Packet>, DemuxerError>;
 }
 
 #[derive(Debug)]
@@ -117,6 +119,9 @@ pub enum DemuxerError {
     NeedMore(usize),
     #[error("")]
     Seek(SeekFrom),
+
+    #[error("End of stream")]
+    EndOfStream,
 
     // TODO: Skip(usize)
     #[error("{0}")]

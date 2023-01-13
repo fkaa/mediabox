@@ -320,7 +320,8 @@ impl GrowableBufferedReader {
         if self.end - self.pos > 0 {
             self.buf.copy_within(self.pos..self.end, 0);
         }
-
+        
+        self.buf_pos += self.pos;
         self.end -= self.pos;
         self.pos = 0;
     }
@@ -415,6 +416,7 @@ impl Buffered for GrowableBufferedReader {
     }
     fn consume(&mut self, amt: usize) {
         self.pos = cmp::min(self.pos + amt, self.end);
+        // dbg!(self.buf_pos, self.pos);
         self.index += amt;
     }
 }

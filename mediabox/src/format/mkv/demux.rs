@@ -3,13 +3,13 @@ use anyhow::Context;
 use async_trait::async_trait;
 
 use log::*;
-use nom::combinator::opt;
+use nom::{combinator::opt, bytes::streaming::take, number::streaming::{be_i16, u8}, IResult};
 
 use std::io::SeekFrom;
 
 use crate::{
     format::{Demuxer2, DemuxerError},
-    io::Buffered,
+    io::Buffered, MediaTime,
 };
 
 use super::ebml::*;
@@ -45,6 +45,29 @@ macro_rules! element {
             *$dst = opt($ebml)($input)?.1;
         }
     };
+}
+
+#[derive(Clone, Debug, Default)]
+struct MkvSimpleBlock<'a> {
+    track_number: u64,
+    timestamp: i16,
+    flags: u8,
+    buffer: &'a [u8],
+}
+
+fn read_simple_block<'a>(input: &'a [u8]) -> IResult<&'a [u8], MkvSimpleBlock<'a>, EbmlError> {
+    let (input, track_number) = ebml_vint(input)?;
+    let (input, timestamp) = be_i16(input)?;
+    let (input, flags) = u8(input)?;
+
+    let buffer = input;
+
+    Ok((input, MkvSimpleBlock {
+        track_number,
+        timestamp,
+        flags,
+        buffer,
+    }))
 }
 
 fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
@@ -237,6 +260,50 @@ fn parse_track(input: &[u8]) -> Result<MkvTrack, DemuxerError> {
 }
 
 impl MatroskaDemuxer {
+    fn read_packet_internal<'a>(&mut self, input: &'a [u8]) -> Result<(&'a [u8], Option<Packet>), DemuxerError> {
+        let (remaining, (id, len)) = ebml_element_header()(input)?;
+
+        match id {
+            self::CLUSTER => {
+                Ok((remaining, None))
+            }
+            self::CUES => {
+                Err(DemuxerError::EndOfStream)
+            }
+            self::TIMESTAMP => {
+                let (remaining, time) = ebml_uint(TIMESTAMP)(input)?;
+
+                self.current_cluster_ts = time;
+
+                Ok((remaining, None))
+            },
+            self::SIMPLE_BLOCK => {
+                let len = len.require().context("Expected simple block to have known length")?;
+
+                let (remaining, bytes) = take(len)(remaining)?;
+                let (_, blk) = read_simple_block(bytes)?;
+
+                let packet = self.convert_block_to_packet(blk);
+
+                Ok((remaining, packet))
+            }
+            _ => {
+                // eprintln!("{id:?}");
+                // TODO: error instead?
+                // if we dont recognize the element, skip
+                let len = len
+                    .require()
+                    .context("Found element with unknown size while parsing clusters")?;
+
+                let header_len = slice_dist(input, remaining);
+
+                Err(DemuxerError::Seek(SeekFrom::Current(
+                    (header_len + len) as i64,
+                )))
+            }
+        }
+    }
+
     fn read_headers_internal<'a>(&mut self, input: &'a [u8]) -> Result<&'a [u8], DemuxerError> {
         match self.state {
             State::LookingForEbmlHeader => {
@@ -290,26 +357,43 @@ impl MatroskaDemuxer {
 
                 let scale = info.scale.unwrap_or(1000000);
 
-                self.timebase = Fraction::new(1, scale as u32);
+                self.timebase = Fraction::new(1, (scale / 1000) as u32);
 
-                return Ok((remaining, INFO));
+                Ok((remaining, INFO))
             }
             self::TRACKS => {
                 let (remaining, tracks) = parse_tracks(input)?;
 
-                convert_tracks(self.timebase.clone(), &mut self.movie, &tracks)?;
+                convert_tracks(self.timebase, &mut self.movie, &tracks)?;
 
-                return Ok((remaining, TRACKS));
+                Ok((remaining, TRACKS))
             }
 
             _ => {
                 let header_len = slice_dist(input, remaining);
 
-                return Err(DemuxerError::Seek(SeekFrom::Current(
+                Err(DemuxerError::Seek(SeekFrom::Current(
                     (header_len + len) as i64,
-                )));
+                )))
             }
         }
+    }
+
+    fn convert_block_to_packet(&self, blk: MkvSimpleBlock) -> Option<Packet> {
+        let track = self.movie.tracks.iter().find(|t| t.id == blk.track_number as u32).cloned()?;
+
+        let time = MediaTime {
+            pts: self.current_cluster_ts.checked_add_signed(blk.timestamp as i64).unwrap_or(0),
+            dts: None,
+            duration: None,
+            timebase: track.timebase,
+        };
+
+        let key = (blk.flags & 0b1000_0000) != 0;
+
+        let buffer = blk.buffer.to_vec().into();
+
+        Some(Packet { time, key, track, buffer })
     }
 }
 
@@ -348,8 +432,17 @@ impl Demuxer2 for MatroskaDemuxer {
         }
     }
 
-    fn read_packet(&mut self, buf: &mut dyn crate::io::Buffered) -> Result<Packet, DemuxerError> {
-        todo!()
+    fn read_packet(&mut self, buf: &mut dyn crate::io::Buffered) -> Result<Option<Packet>, DemuxerError> {
+        loop {
+            let input = buf.data();
+
+            let (remaining, packet) = self.read_packet_internal(input)?;
+            buf.consume(slice_dist(input, remaining) as usize);
+
+            if let Some(packet) = packet {
+                return Ok(Some(packet));
+            }
+        } 
     }
 }
 
