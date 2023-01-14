@@ -29,19 +29,26 @@ pub trait Muxer2 {
     fn start(&mut self, movie: Movie) -> Result<Span, MuxerError>;
     fn write(&mut self, packet: Packet) -> Result<Span, MuxerError>;
     fn stop(&mut self) -> Result<Span, MuxerError>;
+
+    fn create() -> Box<dyn Muxer2>
+    where
+        Self: Default + 'static,
+    {
+        Box::<Self>::default()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum MuxerError {
-    #[error("")]
+    #[error("Need more data")]
     NeedMore,
-    #[error("")]
+
+    #[error("Requesting seek")]
     Seek(SeekFrom),
 
     #[error("End of stream")]
     EndOfStream,
 
-    // TODO: Skip(usize)
     #[error("{0}")]
     Misc(#[from] anyhow::Error),
 }
@@ -69,12 +76,12 @@ pub trait Muxer: Send {
 #[derive(Clone)]
 pub struct MuxerMetadata {
     pub name: &'static str,
-    pub create: fn(Io) -> Box<dyn Muxer>,
+    pub create: fn() -> Box<dyn Muxer2>,
 }
 
 impl MuxerMetadata {
-    pub fn create(&self, io: Io) -> Box<dyn Muxer> {
-        (self.create)(io)
+    pub fn create(&self) -> Box<dyn Muxer2> {
+        (self.create)()
     }
 }
 

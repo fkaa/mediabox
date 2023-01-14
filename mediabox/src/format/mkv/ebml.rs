@@ -31,19 +31,19 @@ impl EbmlLength {
     }
 }
 #[derive(Debug)]
-pub struct EbmlMasterElement(pub EbmlId, pub Vec<EbmlElement>);
+pub struct EbmlMasterElement<'a>(pub EbmlId, pub &'a [EbmlElement<'a>]);
 #[derive(Debug)]
-pub struct EbmlElement(pub EbmlId, pub EbmlValue);
+pub struct EbmlElement<'a>(pub EbmlId, pub EbmlValue<'a>);
 #[derive(Debug)]
-pub enum EbmlValue {
+pub enum EbmlValue<'a> {
     Int(i64),
     UInt(u64),
     String(String),
     Binary(Bytes),
-    MasterElement(EbmlMasterElement),
+    MasterElement(EbmlMasterElement<'a>),
 }
 
-impl EbmlValue {
+impl<'a> EbmlValue<'a> {
     fn size(&self) -> u64 {
         match self {
             &EbmlValue::Int(value) => int_element_bytes_required(value) as u64,
@@ -91,7 +91,7 @@ impl EbmlLength {
     }
 }
 
-impl EbmlMasterElement {
+impl<'a> EbmlMasterElement<'a> {
     fn full_size(&self) -> u64 {
         self.0.size() + self.size()
     }
@@ -104,13 +104,13 @@ impl EbmlMasterElement {
         self.0.write(buf);
         EbmlLength::Known(self.size()).write(buf);
 
-        for element in &self.1 {
+        for element in self.1 {
             element.write(buf);
         }
     }
 }
 
-impl EbmlElement {
+impl<'a> EbmlElement<'a> {
     fn full_size(&self) -> u64 {
         self.0.size() + EbmlLength::Known(self.size()).size() + self.size()
     }
