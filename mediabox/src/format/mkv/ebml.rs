@@ -696,10 +696,10 @@ fn vint_bytes_required(value: u64) -> u64 {
 
 #[cfg(test)]
 mod test {
-    use super::*;
+    /*use super::*;
     use assert_matches::assert_matches;
     use std::io::Cursor;
-    use test_case::test_case;
+    use test_case::test_case;*/
 
     /*#[test_case(&[0b1000_0010], 2)]
     #[test_case(&[0b0100_0000, 0b0000_0010], 2)]

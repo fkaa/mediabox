@@ -82,7 +82,7 @@ pub enum MkvError {
 
 #[cfg(test)]
 mod test {
-    use std::io::Cursor;
+    /*use std::io::Cursor;
 
     use test_case::test_case;
 
@@ -93,7 +93,7 @@ mod test {
         test_files,
     };
 
-    use super::{MatroskaDemuxer, MatroskaMuxer};
+    use super::{MatroskaDemuxer, MatroskaMuxer};*/
 
     /*test_files! {
         #[tokio::test]

@@ -214,7 +214,6 @@ mod test {
             Op::Assert(b""),
         ]
     )]
-    #[test]
     fn buffered_reader(capacity: usize, data: &'static [u8], ops: &[Op]) {
         let cur = Cursor::new(data);
         let reader = SyncReader::Seekable(Box::new(cur));

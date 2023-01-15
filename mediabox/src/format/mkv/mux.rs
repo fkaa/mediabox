@@ -1,17 +1,11 @@
-use std::fs;
-
-use async_trait::async_trait;
-use bytes::BytesMut;
-
 use crate::{
     format::{
         mkv::{EBML_DOC_TYPE, EBML_DOC_TYPE_VERSION},
-        Muxer, Muxer2, Movie, MuxerError,
+        Muxer2, Movie, MuxerError,
     },
     Packet,
     Span,
-    io::Io,
-    muxer, OwnedPacket, Track,
+    muxer,
 };
 
 use super::*;
