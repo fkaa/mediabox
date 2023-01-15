@@ -13,6 +13,7 @@ mod test;
 
 pub mod media;
 pub mod span;
+pub mod memory;
 
 pub mod buffer;
 pub mod codec;

@@ -1,4 +1,4 @@
-use std::io::SeekFrom;
+use std::{io::{SeekFrom, Cursor}, sync::mpsc::{Receiver, Sender}};
 
 use async_trait::async_trait;
 
@@ -20,6 +20,13 @@ macro_rules! muxer {
 pub struct SyncMuxerContext {}
 
 impl SyncMuxerContext {}
+
+
+
+
+pub struct ScratchMemory<'a> {
+    buf: Cursor<&'a mut [u8]>,
+}
 
 pub trait MuxerContext {
     fn write(&mut self, span: Span);
