@@ -21,13 +21,24 @@ pub struct SyncMuxerContext {}
 
 impl SyncMuxerContext {}
 
+pub struct ScratchMemory<'a> {
+    buf: &'a mut [u8],
+}
+
+impl<'a> ScratchMemory<'a> {
+
+    pub fn write<F: FnOnce(&mut ScratchMemory)>(&mut self, func: F) -> Result<Span, MuxerError> {
+        todo!()
+    }
+}
+
 pub trait MuxerContext {
     fn write(&mut self, span: Span);
 }
 
 pub trait Muxer2 {
-    fn start(&mut self, movie: Movie) -> Result<Span, MuxerError>;
-    fn write(&mut self, packet: Packet) -> Result<Span, MuxerError>;
+    fn start(&mut self, scratch: &mut ScratchMemory, movie: Movie) -> Result<Span, MuxerError>;
+    fn write(&mut self, scratch: &mut ScratchMemory, packet: Packet) -> Result<Span, MuxerError>;
     fn stop(&mut self) -> Result<Span, MuxerError>;
 
     fn create() -> Box<dyn Muxer2>

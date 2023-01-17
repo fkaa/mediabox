@@ -4,10 +4,6 @@ use std::{
     sync::mpsc::{self, Receiver, Sender},
 };
 
-pub struct ScratchMemory<'a> {
-    buf: &'a mut [u8],
-}
-
 pub struct Memory {
     memory: Vec<u8>,
     send: Sender<Vec<u8>>,

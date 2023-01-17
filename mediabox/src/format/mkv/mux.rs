@@ -1,7 +1,7 @@
 use crate::{
     format::{
         mkv::{EBML_DOC_TYPE, EBML_DOC_TYPE_VERSION},
-        Movie, Muxer2, MuxerError,
+        Movie, Muxer2, MuxerError, ScratchMemory,
     },
     muxer, Packet, Span,
 };
@@ -16,7 +16,7 @@ pub struct MatroskaMuxer {}
 impl MatroskaMuxer {}
 
 impl Muxer2 for MatroskaMuxer {
-    fn start(&mut self, movie: Movie) -> Result<Span, MuxerError> {
+    fn start(&mut self, scratch: &mut ScratchMemory, movie: Movie) -> Result<Span, MuxerError> {
         let header = EbmlMasterElement(
             EBML_HEADER,
             &[
@@ -31,7 +31,7 @@ impl Muxer2 for MatroskaMuxer {
 
         todo!()
     }
-    fn write(&mut self, packet: Packet) -> Result<Span, MuxerError> {
+    fn write(&mut self, scratch: &mut ScratchMemory, packet: Packet) -> Result<Span, MuxerError> {
         todo!()
     }
     fn stop(&mut self) -> Result<Span, MuxerError> {
