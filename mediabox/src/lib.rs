@@ -105,7 +105,7 @@ pub enum Transcode {
     },
 }
 
-pub struct PacketTranscoder {
+/*pub struct PacketTranscoder {
     mapping: HashMap<u32, Transcode>,
 }
 
@@ -169,7 +169,7 @@ fn process_transcode<F: FnMut(Packet) + Send + 'static>(
     }
 
     Ok(())
-}
+}*/
 
 #[derive(Copy, Clone)]
 pub struct Fraction {

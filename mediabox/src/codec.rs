@@ -29,13 +29,13 @@ macro_rules! encoder {
     };
 }
 
-pub trait Decoder: Send + Sync {
+pub trait Decoder {
     fn start(&mut self, info: &MediaInfo) -> anyhow::Result<()>;
     fn feed(&mut self, packet: Packet) -> anyhow::Result<()>;
     fn receive(&mut self) -> Option<Decoded>;
 }
 
-pub trait Encoder: Send + Sync {
+pub trait Encoder {
     fn start(&mut self, desc: CodecDescription) -> anyhow::Result<Track>;
     fn feed(&mut self, raw: Decoded) -> anyhow::Result<()>;
     fn receive(&mut self) -> Option<Packet>;

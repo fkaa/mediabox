@@ -21,9 +21,6 @@ pub struct SyncMuxerContext {}
 
 impl SyncMuxerContext {}
 
-
-
-
 pub struct ScratchMemory<'a> {
     buf: Cursor<&'a mut [u8]>,
 }

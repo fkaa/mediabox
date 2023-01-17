@@ -3,6 +3,9 @@ use bytes::{Bytes, BytesMut};
 use std::borrow::Cow;
 use std::io::IoSlice;
 use std::ops::{Range, RangeBounds};
+use std::sync::Arc;
+
+use crate::memory::Memory;
 
 /// A byte rope-like structure for efficiently appending and slicing byte sequences.
 #[derive(Debug, Clone)]
@@ -10,6 +13,7 @@ pub enum Span<'a> {
     Many(Vec<Span<'a>>),
     Single(Bytes),
     Slice(&'a [u8]),
+    RefCounted(Option<Arc<Memory>>, usize, usize),
 }
 
 impl<'a> Default for Span<'a> {
@@ -73,7 +77,7 @@ impl Span<'static> {
 impl<'a> Span<'a> {
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         match self {
-            Span::Many(_) | Span::Slice(_) => {
+            Span::Many(_) | Span::Slice(_) | Span::RefCounted(...) => {
                 use std::ops::Bound::*;
 
                 let start = range.start_bound();
