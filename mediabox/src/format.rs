@@ -83,7 +83,6 @@ impl DemuxerContext {
 
     pub fn read_packet<'a>(&'a mut self) -> anyhow::Result<Option<Packet<'a>>> {
         loop {
-<<<<<<< Updated upstream
             let err = {
                 let buf = unsafe { std::mem::transmute::<&[u8], &[u8]>(&self.buf) };
                 let data = self.reader.data(buf);
@@ -109,20 +108,6 @@ impl DemuxerContext {
 
                     self.reader.seek(seek)?;
                 }
-=======
-            match self.demuxer.read_packet(&mut self.buf) {
-                Ok(pkt) => return Ok(pkt),
-                Err(DemuxerError::NeedMore(more)) => {
-                    self.buf.ensure_additional(more);
-                    self.buf.fill_buf()?;
-                },
-                Err(DemuxerError::Seek(seek)) => {
-                    // eprintln!("seeking: {seek:?}");
-
-                    self.buf.seek(seek)?;
-                },
-                Err(DemuxerError::Misc(err)) => return Err(err),
->>>>>>> Stashed changes
             }
         }
     }

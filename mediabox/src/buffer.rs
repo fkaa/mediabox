@@ -63,7 +63,6 @@ impl GrowableBufferedReader {
     pub fn ensure_capacity(&mut self, buf: &mut Vec<u8>, len: usize) {
         let capacity_left = buf.len() - self.pos;
 
-
         if capacity_left >= len {
             return;
         }
@@ -90,9 +89,11 @@ impl GrowableBufferedReader {
             };
 
             if read == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Reached end of stream"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Reached end of stream",
+                ));
             }
-
 
             self.end += read;
         }

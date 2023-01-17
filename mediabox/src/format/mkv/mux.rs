@@ -1,11 +1,9 @@
 use crate::{
     format::{
         mkv::{EBML_DOC_TYPE, EBML_DOC_TYPE_VERSION},
-        Muxer2, Movie, MuxerError,
+        Movie, Muxer2, MuxerError,
     },
-    Packet,
-    Span,
-    muxer,
+    muxer, Packet, Span,
 };
 
 use super::*;
@@ -13,11 +11,9 @@ use super::*;
 muxer!("mkv", MatroskaMuxer::create);
 
 #[derive(Default)]
-pub struct MatroskaMuxer {
-}
+pub struct MatroskaMuxer {}
 
-impl MatroskaMuxer {
-}
+impl MatroskaMuxer {}
 
 impl Muxer2 for MatroskaMuxer {
     fn start(&mut self, movie: Movie) -> Result<Span, MuxerError> {

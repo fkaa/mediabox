@@ -1,4 +1,12 @@
-use std::{sync::mpsc::{Sender, Receiver, self}, mem, fmt, ops::Deref};
+use std::{
+    fmt, mem,
+    ops::{Deref, DerefMut},
+    sync::mpsc::{self, Receiver, Sender},
+};
+
+pub struct ScratchMemory<'a> {
+    buf: &'a mut [u8],
+}
 
 pub struct Memory {
     memory: Vec<u8>,
@@ -28,9 +36,15 @@ impl Deref for Memory {
     }
 }
 
+impl DerefMut for Memory {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.memory
+    }
+}
+
 pub struct MemoryPoolConfig {
-    max_capacity: Option<usize>,
-    default_memory_capacity: usize,
+    pub max_capacity: Option<usize>,
+    pub default_memory_capacity: usize,
 }
 
 pub struct MemoryPool {
@@ -45,7 +59,13 @@ impl MemoryPool {
     pub fn new(config: MemoryPoolConfig) -> Self {
         let (send, recv) = mpsc::channel();
 
-        MemoryPool { pool: Vec::new(), config, alloc_count: 0, recv, send }
+        MemoryPool {
+            pool: Vec::new(),
+            config,
+            alloc_count: 0,
+            recv,
+            send,
+        }
     }
 
     pub fn alloc(&mut self, size: usize) -> Memory {
@@ -85,7 +105,10 @@ impl MemoryPool {
     }
 
     fn create_memory(&self, memory: Vec<u8>) -> Memory {
-        Memory { memory, send: self.send.clone(), }
+        Memory {
+            memory,
+            send: self.send.clone(),
+        }
     }
 
     fn find_best_alloc(&mut self, size: usize) -> Option<Vec<u8>> {
@@ -122,7 +145,10 @@ mod test {
 
     #[test]
     fn test_memory_pool_capacity() {
-        let config = MemoryPoolConfig { max_capacity: Some(1), default_memory_capacity: 1024 };
+        let config = MemoryPoolConfig {
+            max_capacity: Some(1),
+            default_memory_capacity: 1024,
+        };
         let mut pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(1024);
@@ -134,7 +160,10 @@ mod test {
 
     #[test]
     fn test_memory_pool_capacity_and_return_memory() {
-        let config = MemoryPoolConfig { max_capacity: Some(1), default_memory_capacity: 1024 };
+        let config = MemoryPoolConfig {
+            max_capacity: Some(1),
+            default_memory_capacity: 1024,
+        };
         let mut pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(1024);
@@ -151,7 +180,10 @@ mod test {
 
     #[test]
     fn test_memory_pool_capacity_and_return_memory_and_alloc_over_default() {
-        let config = MemoryPoolConfig { max_capacity: Some(1), default_memory_capacity: 1024 };
+        let config = MemoryPoolConfig {
+            max_capacity: Some(1),
+            default_memory_capacity: 1024,
+        };
         let mut pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(1024);
@@ -173,7 +205,10 @@ mod test {
     #[test_case(1024)]
     #[test_case(2048)]
     fn test_memory_pool_alloc_over_default(size: usize) {
-        let config = MemoryPoolConfig { max_capacity: None, default_memory_capacity: 1024 };
+        let config = MemoryPoolConfig {
+            max_capacity: None,
+            default_memory_capacity: 1024,
+        };
         let mut pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(size);
@@ -184,7 +219,10 @@ mod test {
 
     #[test]
     fn test_memory_pool_alloc_under_default() {
-        let config = MemoryPoolConfig { max_capacity: None, default_memory_capacity: 1024 };
+        let config = MemoryPoolConfig {
+            max_capacity: None,
+            default_memory_capacity: 1024,
+        };
         let mut pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(512);

@@ -13,7 +13,15 @@ pub enum Span<'a> {
     Many(Vec<Span<'a>>),
     Single(Bytes),
     Slice(&'a [u8]),
-    RefCounted(Option<Arc<Memory>>, usize, usize),
+    NonRealizedMemory {
+        start: usize,
+        end: usize,
+    },
+    RefCounted {
+        memory: Arc<Memory>,
+        start: usize,
+        end: usize,
+    },
 }
 
 impl<'a> Default for Span<'a> {
@@ -62,6 +70,10 @@ impl Span<'static> {
             }
             Span::Single(span) => func(span.clone()),
             Span::Slice(span) => func(Bytes::from_static(span)),
+            Span::RefCounted { memory, start, end } => {
+                func(Bytes::copy_from_slice(&memory[*start..*end]))
+            }
+            Span::NonRealizedMemory { .. } => panic!("span memory must be realized"),
         }
     }
 
@@ -77,7 +89,10 @@ impl Span<'static> {
 impl<'a> Span<'a> {
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         match self {
-            Span::Many(_) | Span::Slice(_) | Span::RefCounted(...) => {
+            Span::Many(_)
+            | Span::Slice(_)
+            | Span::NonRealizedMemory { .. }
+            | Span::RefCounted { .. } => {
                 use std::ops::Bound::*;
 
                 let start = range.start_bound();
@@ -131,6 +146,15 @@ impl<'a> Span<'a> {
 
                 Span::Many(new_spans)
             }
+            Span::RefCounted { memory, start, end } => Span::RefCounted {
+                memory: memory.clone(),
+                start: start + range.start,
+                end: start + range.end,
+            },
+            Span::NonRealizedMemory { start, end } => Span::NonRealizedMemory {
+                start: start + range.start,
+                end: start + range.end,
+            },
             Span::Single(bytes) => Span::Single(bytes.slice(range)),
             Span::Slice(bytes) => Span::Slice(&bytes[range]),
         }
@@ -141,6 +165,8 @@ impl<'a> Span<'a> {
     pub fn to_slice(&'a self) -> Cow<'a, [u8]> {
         match self {
             Span::Many(spans) => Cow::Owned(self.to_bytes().to_vec()),
+            Span::RefCounted { memory, start, end } => Cow::Borrowed(&memory[*start..*end]),
+            Span::NonRealizedMemory { .. } => panic!("span memory must be realized"),
             Span::Single(span) => Cow::Borrowed(span),
             Span::Slice(span) => Cow::Borrowed(span),
         }
@@ -153,9 +179,38 @@ impl<'a> Span<'a> {
                     span.visit(func);
                 }
             }
+            Span::RefCounted { memory, start, end } => func(&memory[*start..*end]),
+            Span::NonRealizedMemory { .. } => panic!("span memory must be realized"),
             Span::Single(span) => func(&span[..]),
             Span::Slice(span) => func(&span[..]),
         }
+    }
+
+    pub fn visit_mut<F: FnMut(&mut Span)>(&mut self, func: &mut F) {
+        match self {
+            Span::Many(spans) => {
+                for span in spans {
+                    span.visit_mut(func);
+                }
+            }
+            span @ _ => func(span),
+        }
+    }
+
+    pub fn realize_with_memory(mut self, memory: Memory) -> Self {
+        let memory = Arc::new(memory);
+
+        self.visit_mut(&mut |span| {
+            if let Span::NonRealizedMemory { start, end } = span {
+                *span = Span::RefCounted {
+                    memory: memory.clone(),
+                    start: *start,
+                    end: *end,
+                };
+            }
+        });
+
+        self
     }
 
     pub fn to_io_slice(&'a self) -> Vec<IoSlice<'a>> {
@@ -172,6 +227,10 @@ impl<'a> Span<'a> {
                 self.visit(&mut |b| bytes.extend(&b[..]));
                 bytes.freeze()
             }
+            Span::RefCounted { memory, start, end } => {
+                Bytes::copy_from_slice(&memory[*start..*end])
+            }
+            Span::NonRealizedMemory { .. } => panic!("span memory must be realized"),
             Span::Single(bytes) => bytes.clone(),
             Span::Slice(bytes) => Bytes::copy_from_slice(bytes),
         }
@@ -195,6 +254,7 @@ impl<'a> Span<'a> {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::memory::*;
     use test_case::test_case;
 
     #[test_case(&[b"abc", b"def", b"ghj"], .., b"abcdefghj")]
@@ -206,8 +266,45 @@ mod test {
     #[test_case(&[b"a", b"def", b"j"], 1..4, b"def")]
     #[test_case(&[b"a", b"def", b"j"], 1.., b"defj")]
     #[test_case(&[b"a", b"def", b"j"], ..4, b"adef")]
-    fn slice(spans: &[&'static [u8]], slice: impl RangeBounds<usize>, expected: &[u8]) {
+    fn slice_static(spans: &[&'static [u8]], slice: impl RangeBounds<usize>, expected: &[u8]) {
         let span = spans.iter().map(|&s| Span::from(s)).collect::<Span>();
+        dbg!(&span);
+        let sliced_span = span.slice(slice);
+        dbg!(&sliced_span);
+        let bytes = sliced_span.to_bytes();
+
+        assert_eq!(expected, bytes);
+    }
+
+    #[test_case(&[b"abc", b"def", b"ghj"], .., b"abcdefghj")]
+    #[test_case(&[b"abc", b"def", b"ghj"], 1..8, b"bcdefgh")]
+    #[test_case(&[b"abc", b"def", b"ghj"], ..1, b"a")]
+    #[test_case(&[b"abc", b"def", b"ghj"], 3..=6, b"defg")]
+    #[test_case(&[b"abc", b"def", b"ghj"], 3..6, b"def")]
+    #[test_case(&[b"a", b"def", b"j"], .., b"adefj")]
+    #[test_case(&[b"a", b"def", b"j"], 1..4, b"def")]
+    #[test_case(&[b"a", b"def", b"j"], 1.., b"defj")]
+    #[test_case(&[b"a", b"def", b"j"], ..4, b"adef")]
+    fn slice_memory(spans: &[&'static [u8]], slice: impl RangeBounds<usize>, expected: &[u8]) {
+        let mut pool = MemoryPool::new(MemoryPoolConfig {
+            max_capacity: None,
+            default_memory_capacity: 0,
+        });
+
+        let span = spans
+            .iter()
+            .map(|&s| {
+                let len = s.len();
+                let mut memory = pool.alloc(len);
+                memory.copy_from_slice(s);
+
+                Span::RefCounted {
+                    memory: Arc::new(memory),
+                    start: 0,
+                    end: len,
+                }
+            })
+            .collect::<Span>();
         dbg!(&span);
         let sliced_span = span.slice(slice);
         dbg!(&sliced_span);

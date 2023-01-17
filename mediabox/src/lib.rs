@@ -12,8 +12,8 @@ use std::{collections::HashMap, fmt};
 // mod test;
 
 pub mod media;
-pub mod span;
 pub mod memory;
+pub mod span;
 
 pub mod buffer;
 pub mod codec;

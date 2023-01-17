@@ -227,19 +227,23 @@ impl fmt::Debug for MediaInfo {
         if self.codec_id.is_video() {
             write!(f, "{} {}x{}", self.codec_id, self.width, self.height)?;
 
-            return Ok(())
+            return Ok(());
         }
 
         if self.codec_id.is_audio() {
-            write!(f, "{} {}hz {:?}", self.codec_id, self.sample_freq, self.sound_type)?;
+            write!(
+                f,
+                "{} {}hz {:?}",
+                self.codec_id, self.sample_freq, self.sound_type
+            )?;
 
-            return Ok(())
+            return Ok(());
         }
 
         if self.codec_id.is_subtitle() {
             write!(f, "{}", self.codec_id)?;
 
-            return Ok(())
+            return Ok(());
         }
 
         write!(f, "{}", self.codec_id)

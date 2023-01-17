@@ -14,7 +14,7 @@ use std::io::SeekFrom;
 use crate::{
     buffer::Buffered,
     format::{Demuxer2, DemuxerError},
-    MediaTime, Span, CodecId, SoundType,
+    CodecId, MediaTime, SoundType, Span,
 };
 
 use super::ebml::*;
@@ -341,9 +341,7 @@ fn read_ebml_header(input: &[u8]) -> Result<&[u8], DemuxerError> {
         })(input);
 
     match header_result {
-        Ok((remaining, header)) => {
-            Ok(remaining)
-        }
+        Ok((remaining, header)) => Ok(remaining),
         Err(nom::Err::Error(EbmlError::UnexpectedElement(expected, id, len))) => Err(
             DemuxerError::Misc(anyhow::anyhow!("Expected EBML header, found {id:?}")),
         ),
@@ -415,9 +413,7 @@ fn fill_video_info(info: &mut MediaInfo, track: MkvTrack) -> anyhow::Result<()> 
         CodecId::H264 => {
             info.codec_private = Span::from(mand(track.codec_private, CODEC_PRIVATE)?.to_vec());
         }
-        _ => {
-
-        }
+        _ => {}
     }
 
     Ok(())
@@ -455,27 +451,28 @@ fn parse_info(input: &[u8]) -> Result<(&[u8], MkvInfo), DemuxerError> {
     )(input)?)
 }
 
-fn parse_tracks<'a, 'b>(input: &'a [u8], timebase: Fraction, movie: &'b mut Movie) -> Result<&'a [u8], DemuxerError> {
-    Ok(ebml_master_element_fold(
-        TRACKS,
-        (),
-        |_, input| {
-            if let Ok(track) = parse_track(input) {
-                match convert_track(track) {
-                    Ok((id, info)) => movie.tracks.push(Track {
-                        id: id as u32,
-                        info: info.into(),
-                        timebase: timebase.clone(),
-                    }),
-                    Err(e) => {
-                        warn!("Ignoring track: {e}");
-                    }
+fn parse_tracks<'a, 'b>(
+    input: &'a [u8],
+    timebase: Fraction,
+    movie: &'b mut Movie,
+) -> Result<&'a [u8], DemuxerError> {
+    Ok(ebml_master_element_fold(TRACKS, (), |_, input| {
+        if let Ok(track) = parse_track(input) {
+            match convert_track(track) {
+                Ok((id, info)) => movie.tracks.push(Track {
+                    id: id as u32,
+                    info: info.into(),
+                    timebase: timebase.clone(),
+                }),
+                Err(e) => {
+                    warn!("Ignoring track: {e}");
                 }
             }
+        }
 
-            Ok(())
-        },
-    )(input)?.0)
+        Ok(())
+    })(input)?
+    .0)
 }
 
 #[derive(Clone, Debug, Default)]
