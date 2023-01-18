@@ -9,11 +9,15 @@ use downcast::{downcast, Any};
 use fluent_uri::Uri;
 
 use std::{
-    io::{self, Seek, SeekFrom},
+    io::{Seek, SeekFrom},
     path::Path,
 };
 
 use crate::Span;
+
+mod sync;
+
+pub use sync::*;
 
 pub trait WriteSeek: Any + AsyncWrite + AsyncSeek + Unpin + Sync + Send + 'static {}
 pub trait Write: Any + AsyncWrite + Unpin + Sync + Send {}
@@ -41,21 +45,6 @@ impl<T> Read for T where T: AsyncRead + Unpin + Send + Sync + 'static {}
 pub enum Reader {
     Seekable(Box<dyn ReadSeek>),
     Stream(Box<dyn Read>),
-}
-pub trait SyncReadSeek: std::io::Read + Seek {}
-impl<T> SyncReadSeek for T where T: std::io::Read + Seek {}
-
-pub enum SyncReader {
-    Seekable(Box<dyn SyncReadSeek>),
-    Stream(Box<dyn std::io::Read>),
-}
-impl Seek for SyncReader {
-    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
-        match self {
-            SyncReader::Seekable(reader) => reader.seek(pos),
-            SyncReader::Stream(_) => Err(io::Error::new(io::ErrorKind::Other, "woops")),
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -9,8 +9,14 @@ fn main() {
 
     env_logger::init();
 
+    let config = MemoryPoolConfig {
+        max_capacity: None,
+        default_memory_capacity: 1024,
+    };
+    let mut pool = MemoryPool::new(config);
+
     let mut demuxer = DemuxerContext::open("./tests/files/testsrc-h264.mkv").unwrap();
-    // let mut muxer = MuxerContext::open("").unwrap();
+    let mut muxer = SyncMuxerContext::open_with_pool("./target/test.mkv", pool.clone()).unwrap();
     // let mut muxer = Mp4Muxer::new(Io::create_file("test.mp4").await.unwrap());
 
     let movie = demuxer.read_headers().unwrap();

@@ -32,6 +32,7 @@ impl EbmlLength {
 }
 #[derive(Debug)]
 pub struct EbmlMasterElement<'a>(pub EbmlId, pub &'a [EbmlElement<'a>]);
+
 #[derive(Debug)]
 pub struct EbmlElement<'a>(pub EbmlId, pub EbmlValue<'a>);
 #[derive(Debug)]
@@ -44,7 +45,7 @@ pub enum EbmlValue<'a> {
 }
 
 impl<'a> EbmlValue<'a> {
-    fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         match self {
             &EbmlValue::Int(value) => int_element_bytes_required(value) as u64,
             &EbmlValue::UInt(value) => uint_element_bytes_required(value) as u64 + 1,
@@ -54,36 +55,36 @@ impl<'a> EbmlValue<'a> {
         }
     }
 
-    pub fn write(&self, buf: &mut BytesMut) {
+    pub fn write(&self, buf: &mut dyn BufMut) {
         match self {
             &EbmlValue::Int(value) => write_int_elem(buf, value),
             &EbmlValue::UInt(value) => write_uint_elem(buf, value),
-            EbmlValue::String(string) => buf.extend_from_slice(string.as_bytes()),
-            EbmlValue::Binary(binary) => buf.extend_from_slice(&binary),
+            EbmlValue::String(string) => buf.put_slice(string.as_bytes()),
+            EbmlValue::Binary(binary) => buf.put_slice(&binary),
             EbmlValue::MasterElement(el) => el.write(buf),
         }
     }
 }
 
 impl EbmlId {
-    fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         (self.0.ilog2() as u64 + 7) / 8
     }
 
-    pub fn write(&self, buf: &mut BytesMut) {
+    pub fn write(&self, buf: &mut dyn BufMut) {
         write_vid(buf, self.0);
     }
 }
 
 impl EbmlLength {
-    fn size(&self) -> u64 {
+    pub fn size(&self) -> u64 {
         match self {
             &EbmlLength::Known(length) => vint_bytes_required(length),
             &EbmlLength::Unknown(bytes) => bytes as u64,
         }
     }
 
-    pub fn write(&self, buf: &mut BytesMut) {
+    pub fn write(&self, buf: &mut dyn BufMut) {
         match self {
             &EbmlLength::Known(length) => write_vint(buf, length),
             &EbmlLength::Unknown(bytes) => buf.put_u8(0b1111_1111),
@@ -92,7 +93,7 @@ impl EbmlLength {
 }
 
 impl<'a> EbmlMasterElement<'a> {
-    fn full_size(&self) -> u64 {
+    pub fn full_size(&self) -> u64 {
         self.0.size() + self.size()
     }
 
@@ -100,7 +101,7 @@ impl<'a> EbmlMasterElement<'a> {
         self.1.iter().map(|v| v.full_size()).sum::<u64>()
     }
 
-    pub fn write(&self, buf: &mut BytesMut) {
+    pub fn write(&self, buf: &mut dyn BufMut) {
         self.0.write(buf);
         EbmlLength::Known(self.size()).write(buf);
 
@@ -119,7 +120,7 @@ impl<'a> EbmlElement<'a> {
         self.1.size()
     }
 
-    pub fn write(&self, buf: &mut BytesMut) {
+    pub fn write(&self, buf: &mut dyn BufMut) {
         println!("{:?}: {:?} ({})", self.0, self.1, self.size());
         self.0.write(buf);
         EbmlLength::Known(self.size()).write(buf);
@@ -128,7 +129,7 @@ impl<'a> EbmlElement<'a> {
     }
 }
 
-pub fn write_ebml<F: FnOnce(&mut BytesMut) -> R, R: Into<Span<'static>>>(
+pub fn write_ebml<F: FnOnce(&mut dyn BufMut) -> R, R: Into<Span<'static>>>(
     id: EbmlId,
     func: F,
 ) -> Span<'static> {
@@ -209,9 +210,9 @@ pub async fn vstr(io: &mut Io, size: u64) -> Result<String, MkvError> {
     Ok(String::from_utf8(data)?)
 }
 
-pub fn write_vstr(buf: &mut BytesMut, string: &str) {
+pub fn write_vstr(buf: &mut dyn BufMut, string: &str) {
     write_vint(buf, string.as_bytes().len() as u64);
-    buf.extend_from_slice(string.as_bytes());
+    buf.put_slice(string.as_bytes());
 }
 
 pub async fn vfloat(io: &mut Io, size: u64) -> Result<f64, MkvError> {
@@ -625,7 +626,7 @@ pub async fn vid(io: &mut Io) -> Result<(u8, u64), MkvError> {
     Ok((len as u8, value))
 }
 
-pub fn write_vint(buf: &mut BytesMut, mut value: u64) {
+pub fn write_vint(buf: &mut dyn BufMut, mut value: u64) {
     let bytes_required = vint_bytes_required(value);
     let len = 1 << (8 - bytes_required);
 
@@ -633,10 +634,10 @@ pub fn write_vint(buf: &mut BytesMut, mut value: u64) {
 
     let bytes = value.to_be_bytes();
 
-    buf.extend(&bytes[8 - bytes_required as usize..]);
+    buf.put_slice(&bytes[8 - bytes_required as usize..]);
 }
 
-pub fn write_vid(buf: &mut BytesMut, id: u64) {
+pub fn write_vid(buf: &mut dyn BufMut, id: u64) {
     let len = (id.ilog2() + 7) / 8;
 
     for i in (0..len).rev() {
@@ -644,7 +645,7 @@ pub fn write_vid(buf: &mut BytesMut, id: u64) {
     }
 }
 
-fn write_int_elem(buf: &mut BytesMut, mut value: i64) {
+fn write_int_elem(buf: &mut dyn BufMut, mut value: i64) {
     while value > 0 {
         buf.put_u8((value & 0xff) as u8);
 
@@ -652,7 +653,7 @@ fn write_int_elem(buf: &mut BytesMut, mut value: i64) {
     }
 }
 
-fn write_uint_elem(buf: &mut BytesMut, mut value: u64) {
+fn write_uint_elem(buf: &mut dyn BufMut, mut value: u64) {
     while value > 0 {
         buf.put_u8((value & 0xff) as u8);
 

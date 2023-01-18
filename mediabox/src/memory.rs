@@ -1,7 +1,10 @@
 use std::{
     fmt, mem,
     ops::{Deref, DerefMut},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::{
+        mpsc::{self, Receiver, Sender},
+        Arc, RwLock,
+    },
 };
 
 pub struct Memory {
@@ -43,7 +46,32 @@ pub struct MemoryPoolConfig {
     pub default_memory_capacity: usize,
 }
 
+#[derive(Clone)]
 pub struct MemoryPool {
+    internal: Arc<RwLock<MemoryPoolImpl>>,
+}
+
+impl MemoryPool {
+    pub fn new(config: MemoryPoolConfig) -> Self {
+        MemoryPool {
+            internal: Arc::new(RwLock::new(MemoryPoolImpl::new(config))),
+        }
+    }
+
+    pub fn alloc(&self, size: usize) -> Memory {
+        let mut internal = self.internal.write().unwrap();
+
+        internal.alloc(size)
+    }
+
+    pub fn try_alloc(&self, size: usize) -> Option<Memory> {
+        let mut internal = self.internal.write().unwrap();
+
+        internal.try_alloc(size)
+    }
+}
+
+pub struct MemoryPoolImpl {
     pool: Vec<Vec<u8>>,
     config: MemoryPoolConfig,
     alloc_count: usize,
@@ -51,11 +79,11 @@ pub struct MemoryPool {
     send: Sender<Vec<u8>>,
 }
 
-impl MemoryPool {
+impl MemoryPoolImpl {
     pub fn new(config: MemoryPoolConfig) -> Self {
         let (send, recv) = mpsc::channel();
 
-        MemoryPool {
+        MemoryPoolImpl {
             pool: Vec::new(),
             config,
             alloc_count: 0,

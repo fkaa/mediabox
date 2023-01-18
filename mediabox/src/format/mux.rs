@@ -2,7 +2,7 @@ use std::io::{Cursor, SeekFrom};
 
 use async_trait::async_trait;
 
-use crate::{io::Io, OwnedPacket, Packet, Span, Track};
+use crate::{io::Io, memory::MemoryPool, OwnedPacket, Packet, Span, Track};
 
 use super::Movie;
 
@@ -17,28 +17,64 @@ macro_rules! muxer {
     };
 }
 
-pub struct SyncMuxerContext {}
+pub struct SyncMuxerContext {
+    muxer: Box<dyn Muxer2>,
+    pool: MemoryPool,
+    scratch_size: usize,
+}
 
-impl SyncMuxerContext {}
+impl SyncMuxerContext {
+    pub fn open_with_pool(uri: &str, pool: MemoryPool) -> Self {
+        todo!()
+    }
+
+    pub fn start(&mut self, movie: &Movie) -> anyhow::Result<()> {
+        loop {
+            let mut memory = self.pool.alloc(self.scratch_size);
+            let mut scratch = ScratchMemory::new(&mut memory);
+
+            match self.muxer.start(&mut scratch, movie) {
+                Ok(span) => {
+                    todo!()
+                }
+                Err(MuxerError::NeedMore(more)) => {
+                    self.scratch_size += more;
+                }
+                Err(MuxerError::Seek(seek)) => {
+                    todo!()
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+}
 
 pub struct ScratchMemory<'a> {
     buf: &'a mut [u8],
+    pos: usize,
 }
 
 impl<'a> ScratchMemory<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        ScratchMemory { buf, pos: 0 }
+    }
 
-    pub fn write<F: FnOnce(&mut ScratchMemory)>(&mut self, func: F) -> Result<Span, MuxerError> {
+    pub fn write<F: FnOnce(&mut [u8])>(
+        &mut self,
+        len: usize,
+        func: F,
+    ) -> Result<Span<'static>, MuxerError> {
+        self.pos += len;
+
         todo!()
     }
 }
 
-pub trait MuxerContext {
-    fn write(&mut self, span: Span);
-}
-
 pub trait Muxer2 {
-    fn start(&mut self, scratch: &mut ScratchMemory, movie: Movie) -> Result<Span, MuxerError>;
-    fn write(&mut self, scratch: &mut ScratchMemory, packet: Packet) -> Result<Span, MuxerError>;
+    fn start(&mut self, scratch: &mut ScratchMemory, movie: &Movie) -> Result<Span, MuxerError>;
+    fn write(&mut self, scratch: &mut ScratchMemory, packet: &Packet) -> Result<Span, MuxerError>;
     fn stop(&mut self) -> Result<Span, MuxerError>;
 
     fn create() -> Box<dyn Muxer2>
@@ -52,7 +88,7 @@ pub trait Muxer2 {
 #[derive(Debug, thiserror::Error)]
 pub enum MuxerError {
     #[error("Need more data")]
-    NeedMore,
+    NeedMore(usize),
 
     #[error("Requesting seek")]
     Seek(SeekFrom),
