@@ -1,8 +1,11 @@
-use std::io::{Cursor, SeekFrom};
+use std::{
+    fs::File,
+    io::{SeekFrom, Write},
+    mem,
+};
 
-use async_trait::async_trait;
-
-use crate::{io::Io, memory::MemoryPool, OwnedPacket, Packet, Span, Track};
+use crate::format::mkv::MatroskaMuxer;
+use crate::{io::SyncWriter, memory::MemoryPool, Packet, Span};
 
 use super::Movie;
 
@@ -20,12 +23,21 @@ macro_rules! muxer {
 pub struct SyncMuxerContext {
     muxer: Box<dyn Muxer2>,
     pool: MemoryPool,
+    write: SyncWriter,
     scratch_size: usize,
 }
 
 impl SyncMuxerContext {
-    pub fn open_with_pool(uri: &str, pool: MemoryPool) -> Self {
-        todo!()
+    pub fn open_with_pool(uri: &str, pool: MemoryPool) -> anyhow::Result<Self> {
+        let muxer = MatroskaMuxer::create();
+        let write = SyncWriter::Seekable(Box::new(File::create(uri)?));
+
+        Ok(SyncMuxerContext {
+            muxer,
+            pool,
+            write,
+            scratch_size: 4096,
+        })
     }
 
     pub fn start(&mut self, movie: &Movie) -> anyhow::Result<()> {
@@ -34,6 +46,33 @@ impl SyncMuxerContext {
             let mut scratch = ScratchMemory::new(&mut memory);
 
             match self.muxer.start(&mut scratch, movie) {
+                Ok(mut span) => {
+                    span.realize_with_memory(memory);
+                    let mut slices = span.to_io_slice();
+                    self.write.write_all_vectored(&mut slices)?;
+
+                    return Ok(());
+                }
+                Err(MuxerError::NeedMore(more)) => {
+                    self.scratch_size += more;
+                }
+                Err(MuxerError::Seek(seek)) => {
+                    // self.write.seek(seek)?;
+                    todo!()
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
+    }
+
+    pub fn write(&mut self, packet: &Packet) -> anyhow::Result<()> {
+        loop {
+            let mut memory = self.pool.alloc(self.scratch_size);
+            let mut scratch = ScratchMemory::new(&mut memory);
+
+            match self.muxer.write(&mut scratch, packet) {
                 Ok(span) => {
                     todo!()
                 }
@@ -66,9 +105,22 @@ impl<'a> ScratchMemory<'a> {
         len: usize,
         func: F,
     ) -> Result<Span<'static>, MuxerError> {
-        self.pos += len;
+        let end = self.pos + len;
 
-        todo!()
+        if end > self.buf.len() {
+            return Err(MuxerError::NeedMore(end - self.buf.len()));
+        }
+
+        func(&mut self.buf[self.pos..end]);
+
+        let span = Span::NonRealizedMemory {
+            start: self.pos,
+            end,
+        };
+
+        self.pos = end;
+
+        Ok(span)
     }
 }
 
@@ -100,26 +152,6 @@ pub enum MuxerError {
     Misc(#[from] anyhow::Error),
 }
 
-/// A trait for exposing functionality related to muxing together multiple streams into a container
-/// format.
-#[async_trait]
-pub trait Muxer: Send {
-    /// Starts the muxer with the given tracks.
-    async fn start(&mut self, tracks: Vec<Track>) -> anyhow::Result<()>;
-
-    /// Writes a packet to the muxer.
-    ///
-    /// Note that this does not ensure something will be written to the output, as it may buffer
-    /// packets internally in order to write its output correctly.
-    async fn write(&mut self, packet: OwnedPacket) -> anyhow::Result<()>;
-
-    /// Stops the muxer. This will flush any buffered packets and finalize the output if
-    /// appropriate.
-    async fn stop(&mut self) -> anyhow::Result<()>;
-
-    fn into_io(self) -> Io;
-}
-
 #[derive(Clone)]
 pub struct MuxerMetadata {
     pub name: &'static str,
@@ -130,9 +162,4 @@ impl MuxerMetadata {
     pub fn create(&self) -> Box<dyn Muxer2> {
         (self.create)()
     }
-}
-
-/// A muxer that can handle splitting up the output into multiple segments.
-pub struct SegmentMuxer {
-    muxer: Box<dyn Muxer>,
 }

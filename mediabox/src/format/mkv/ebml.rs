@@ -39,7 +39,7 @@ pub struct EbmlElement<'a>(pub EbmlId, pub EbmlValue<'a>);
 pub enum EbmlValue<'a> {
     Int(i64),
     UInt(u64),
-    String(String),
+    String(&'a str),
     Binary(Bytes),
     MasterElement(EbmlMasterElement<'a>),
 }
@@ -121,7 +121,6 @@ impl<'a> EbmlElement<'a> {
     }
 
     pub fn write(&self, buf: &mut dyn BufMut) {
-        println!("{:?}: {:?} ({})", self.0, self.1, self.size());
         self.0.write(buf);
         EbmlLength::Known(self.size()).write(buf);
 

@@ -7,9 +7,24 @@ use std::{
     },
 };
 
+use tracing::trace;
+
 pub struct Memory {
     memory: Vec<u8>,
     send: Sender<Vec<u8>>,
+}
+
+impl Memory {
+    pub fn get_offset(&self, slice: &[u8]) -> Option<usize> {
+        let base = self.memory.as_ptr() as usize;
+        let ptr = slice.as_ptr() as usize;
+
+        if ptr >= base && ptr + slice.len() <= base + self.memory.len() {
+            Some(ptr - base)
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Debug for Memory {
@@ -104,11 +119,12 @@ impl MemoryPoolImpl {
 
     pub fn try_alloc(&mut self, size: usize) -> Option<Memory> {
         while let Ok(mem) = self.recv.try_recv() {
-            dbg!("returning memory");
+            trace!("recycling {} bytes", mem.len());
             self.pool.push(mem);
         }
 
         if let Some(mem) = self.find_best_alloc(size) {
+            trace!("found {} bytes to fit {}", mem.len(), size);
             return Some(self.create_memory(mem));
         }
 
@@ -125,6 +141,12 @@ impl MemoryPoolImpl {
         let alloc_size = size.max(self.config.default_memory_capacity);
         let new_memory = vec![0u8; alloc_size];
         self.alloc_count += 1;
+        trace!(
+            "allocated {} bytes to fit {}, {} total allocations",
+            new_memory.len(),
+            size,
+            self.alloc_count
+        );
         Some(self.create_memory(new_memory))
     }
 
@@ -154,6 +176,7 @@ impl MemoryPoolImpl {
 
         let mut mem = self.pool.swap_remove(0);
 
+        trace!("reallocating from {} to {} bytes", mem.len(), size);
         mem.resize(size, 0u8);
 
         Some(mem)

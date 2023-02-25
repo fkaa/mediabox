@@ -3,6 +3,7 @@ use std::{
     fmt::Debug,
     fs::File,
     io::{Seek, SeekFrom},
+    mem,
 };
 
 use async_trait::async_trait;
@@ -11,6 +12,7 @@ use tracing::debug;
 use crate::{
     buffer::{Buffered, GrowableBufferedReader},
     io::{Io, SyncReader},
+    memory::{Memory, MemoryPool},
     Packet, Span, Track,
 };
 
@@ -43,32 +45,65 @@ macro_rules! demuxer {
 pub struct DemuxerContext {
     demuxer: Box<dyn Demuxer2>,
     reader: GrowableBufferedReader,
-    buf: Vec<u8>,
+    pool: MemoryPool,
+    memory: Memory,
+}
+
+fn convert_packet<'a>(
+    pool: &mut MemoryPool,
+    mut memory: &Memory,
+    mut packet: Option<Packet<'a>>,
+) -> Option<Packet<'static>> {
+    if let Some(mut pkt) = packet {
+        // let mut new_memory = pool.alloc(memory.len());
+        // let mut span = Span::default();
+
+        // mem::swap(memory, &mut new_memory);
+        // mem::swap(&mut span, &mut pkt.buffer);
+
+        let new_pkt = Packet {
+            key: pkt.key,
+            time: pkt.time,
+            track: pkt.track,
+            buffer: pkt.buffer.unrealize_from_memory(memory),
+        };
+
+        Some(new_pkt)
+    } else {
+        None
+    }
 }
 
 impl DemuxerContext {
-    pub fn open(url: &str) -> anyhow::Result<Self> {
+    /*pub fn open(url: &str) -> anyhow::Result<Self> {
+        Self::open_with_pool(url, MemoryPool::create
+    }*/
+
+    pub fn open_with_pool(url: &str, pool: MemoryPool) -> anyhow::Result<Self> {
         let demuxer = MatroskaDemuxer::create();
 
         let reader = SyncReader::Seekable(Box::new(File::open(url)?));
-        let (reader, buf) = GrowableBufferedReader::new(reader);
+        let reader = GrowableBufferedReader::new(reader);
+
+        let memory = pool.alloc(0);
 
         Ok(DemuxerContext {
             demuxer,
             reader,
-            buf,
+            pool,
+            memory,
         })
     }
 
     pub fn read_headers(&mut self) -> anyhow::Result<Movie> {
         loop {
-            let data = self.reader.data(&self.buf);
+            let data = self.reader.data(&self.memory);
 
             match self.demuxer.read_headers(data, &mut self.reader) {
                 Ok(movie) => return Ok(movie),
                 Err(DemuxerError::NeedMore(more)) => {
-                    self.reader.ensure_additional(&mut self.buf, more);
-                    self.reader.fill_buf(&mut self.buf)?;
+                    self.reader.ensure_additional(&mut self.memory, more);
+                    self.reader.fill_buf(&mut self.memory)?;
                 }
                 Err(DemuxerError::Seek(seek)) => {
                     debug!("seeking: {seek:?}");
@@ -81,16 +116,26 @@ impl DemuxerContext {
         }
     }
 
-    pub fn read_packet<'a>(&'a mut self) -> anyhow::Result<Option<Packet<'a>>> {
+    pub fn read_packet(&mut self) -> anyhow::Result<Option<Packet<'static>>> {
         loop {
             let err = {
-                let buf = unsafe { std::mem::transmute::<&[u8], &[u8]>(&self.buf) };
-                let data = self.reader.data(buf);
+                let data = self.reader.data(&self.memory);
 
                 let result = self.demuxer.read_packet(data, &mut self.reader);
 
                 match result {
-                    Ok(pkt) => return Ok(pkt),
+                    Ok(mut pkt) => {
+                        let mut pkt = convert_packet(&mut self.pool, &self.memory, pkt);
+
+                        if let Some(ref mut pkt) = &mut pkt {
+                            let mut new_memory = self.pool.alloc(self.memory.len());
+                            mem::swap(&mut self.memory, &mut new_memory);
+
+                            pkt.buffer.realize_with_memory(new_memory);
+                        }
+
+                        return Ok(pkt);
+                    }
                     Err(e) => e,
                 }
             };
@@ -100,8 +145,8 @@ impl DemuxerContext {
                 DemuxerError::Misc(err) => return Err(err),
 
                 DemuxerError::NeedMore(more) => {
-                    self.reader.ensure_additional(&mut self.buf, more);
-                    self.reader.fill_buf(&mut self.buf)?;
+                    self.reader.ensure_additional(&mut self.memory, more);
+                    self.reader.fill_buf(&mut self.memory)?;
                 }
                 DemuxerError::Seek(seek) => {
                     debug!("seeking: {seek:?}");

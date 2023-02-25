@@ -1,5 +1,6 @@
 use mediabox::format::*;
 use mediabox::io::*;
+use mediabox::memory::*;
 
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
@@ -15,9 +16,9 @@ fn main() {
     };
     let mut pool = MemoryPool::new(config);
 
-    let mut demuxer = DemuxerContext::open("./tests/files/testsrc-h264.mkv").unwrap();
+    let mut demuxer =
+        DemuxerContext::open_with_pool("./tests/files/testsrc-h264.mkv", pool.clone()).unwrap();
     let mut muxer = SyncMuxerContext::open_with_pool("./target/test.mkv", pool.clone()).unwrap();
-    // let mut muxer = Mp4Muxer::new(Io::create_file("test.mp4").await.unwrap());
 
     let movie = demuxer.read_headers().unwrap();
 
@@ -25,12 +26,10 @@ fn main() {
         eprintln!(">  {}: {:?}", track.id, track.info);
     }
 
-    // muxer.start(movie.tracks).await.unwrap();
+    muxer.start(&movie).unwrap();
 
     while let Some(pkt) = demuxer.read_packet().unwrap() {
-        // println!("{:?}", pkt.time);
-
-        // muxer.write(pkt).await.unwrap();
+        muxer.write(&pkt).unwrap();
     }
 
     eprintln!("EOS!");

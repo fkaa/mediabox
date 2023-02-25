@@ -17,13 +17,7 @@ pub struct GrowableBufferedReader {
 
 impl GrowableBufferedReader {
     /// Creates a new `AccReader` instance.
-    pub fn new(inner: SyncReader) -> (GrowableBufferedReader, Vec<u8>) {
-        GrowableBufferedReader::with_capacity(4096, inner)
-    }
-
-    /// Creates a new `AccReader` instance of a determined capacity
-    /// for a reader.
-    pub fn with_capacity(cap: usize, inner: SyncReader) -> (GrowableBufferedReader, Vec<u8>) {
+    pub fn new(inner: SyncReader) -> GrowableBufferedReader {
         let reader = GrowableBufferedReader {
             inner,
             buf_pos: 0,
@@ -31,9 +25,8 @@ impl GrowableBufferedReader {
             end: 0,
             index: 0,
         };
-        let buffer = iter::repeat(0).take(cap).collect::<Vec<_>>();
 
-        (reader, buffer)
+        reader
     }
 
     /// Resets the buffer to the current position.

@@ -197,7 +197,17 @@ impl<'a> Span<'a> {
         }
     }
 
-    pub fn realize_with_memory(mut self, memory: Memory) -> Self {
+    pub fn make_static<F: FnMut(Span<'a>) -> Span<'static>>(
+        mut self,
+        func: &mut F,
+    ) -> Span<'static> {
+        match self {
+            Span::Many(mut spans) => spans.into_iter().map(func).collect(),
+            span @ _ => func(span),
+        }
+    }
+
+    pub fn realize_with_memory(&mut self, memory: Memory) {
         let memory = Arc::new(memory);
 
         self.visit_mut(&mut |span| {
@@ -209,8 +219,26 @@ impl<'a> Span<'a> {
                 };
             }
         });
+    }
 
-        self
+    pub fn unrealize_from_memory(mut self, memory: &Memory) -> Span<'static> {
+        self.make_static(&mut |span| match span {
+            Span::Slice(slice) => {
+                let len = slice.len();
+
+                let offset = memory
+                    .get_offset(slice)
+                    .expect("unrealized span with incorrect memory");
+                Span::NonRealizedMemory {
+                    start: offset,
+                    end: offset + len,
+                }
+            }
+            Span::Many(_) => unreachable!(),
+            Span::Single(bytes) => Span::Single(bytes),
+            Span::NonRealizedMemory { start, end } => Span::NonRealizedMemory { start, end },
+            Span::RefCounted { memory, start, end } => Span::RefCounted { memory, start, end },
+        })
     }
 
     pub fn to_io_slice(&'a self) -> Vec<IoSlice<'a>> {
