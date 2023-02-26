@@ -1,6 +1,6 @@
 use std::str::Utf8Error;
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use nom::{bytes::streaming::take, error::ParseError, sequence::pair, IResult, Needed, Parser};
 
 use crate::{format::DemuxerError, io::Io, Span};
@@ -40,8 +40,8 @@ pub enum EbmlValue<'a> {
     Int(i64),
     UInt(u64),
     String(&'a str),
-    Binary(Bytes),
-    MasterElement(EbmlMasterElement<'a>),
+    Binary(Span<'a>),
+    Children(&'a [EbmlElement<'a>]),
 }
 
 impl<'a> EbmlValue<'a> {
@@ -51,7 +51,7 @@ impl<'a> EbmlValue<'a> {
             &EbmlValue::UInt(value) => uint_element_bytes_required(value) as u64 + 1,
             EbmlValue::String(string) => string.as_bytes().len() as u64,
             EbmlValue::Binary(binary) => binary.len() as u64,
-            EbmlValue::MasterElement(el) => el.size(),
+            EbmlValue::Children(el) => el.iter().map(|el| el.full_size()).sum::<u64>(),
         }
     }
 
@@ -60,8 +60,14 @@ impl<'a> EbmlValue<'a> {
             &EbmlValue::Int(value) => write_int_elem(buf, value),
             &EbmlValue::UInt(value) => write_uint_elem(buf, value),
             EbmlValue::String(string) => buf.put_slice(string.as_bytes()),
-            EbmlValue::Binary(binary) => buf.put_slice(&binary),
-            EbmlValue::MasterElement(el) => el.write(buf),
+            EbmlValue::Binary(binary) => {
+                binary.visit(&mut |b| buf.put_slice(b));
+            },
+            EbmlValue::Children(el) => {
+                for el in *el {
+                    el.write(buf);
+                }
+            },
         }
     }
 }
@@ -80,7 +86,7 @@ impl EbmlLength {
     pub fn size(&self) -> u64 {
         match self {
             &EbmlLength::Known(length) => vint_bytes_required(length),
-            &EbmlLength::Unknown(bytes) => bytes as u64,
+            &EbmlLength::Unknown(bytes) => 1,
         }
     }
 
@@ -94,7 +100,10 @@ impl EbmlLength {
 
 impl<'a> EbmlMasterElement<'a> {
     pub fn full_size(&self) -> u64 {
-        self.0.size() + self.size()
+        let content_size = self.size();
+
+        self.0.size() + EbmlLength::Known(content_size).size() + content_size
+        // self.0.size() + self.size()
     }
 
     fn size(&self) -> u64 {
@@ -113,7 +122,9 @@ impl<'a> EbmlMasterElement<'a> {
 
 impl<'a> EbmlElement<'a> {
     fn full_size(&self) -> u64 {
-        self.0.size() + EbmlLength::Known(self.size()).size() + self.size()
+        let content_size = self.size();
+
+        self.0.size() + EbmlLength::Known(content_size).size() + content_size
     }
 
     fn size(&self) -> u64 {

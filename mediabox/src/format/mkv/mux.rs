@@ -17,40 +17,35 @@ impl MatroskaMuxer {}
 
 impl Muxer2 for MatroskaMuxer {
     fn start(&mut self, scratch: &mut ScratchMemory, movie: &Movie) -> Result<Span, MuxerError> {
-        let children = [
+        let ebml_header = EbmlMasterElement(EBML_HEADER, &[
             EbmlElement(EBML_VERSION, EbmlValue::UInt(1)),
             EbmlElement(EBML_READ_VERSION, EbmlValue::UInt(1)),
             EbmlElement(EBML_DOC_MAX_ID_LENGTH, EbmlValue::UInt(4)),
             EbmlElement(EBML_DOC_MAX_SIZE_LENGTH, EbmlValue::UInt(8)),
             EbmlElement(EBML_DOC_TYPE, EbmlValue::String("matroska")),
             EbmlElement(EBML_DOC_TYPE_VERSION, EbmlValue::UInt(1)),
-        ];
-        let header = EbmlMasterElement(EBML_HEADER, &children);
+        ]);
 
         let segment = SEGMENT;
         let segment_len = EbmlLength::Unknown(8);
 
-        let info = EbmlMasterElement(INFO, &[]);
+        let info = EbmlMasterElement(INFO, &[
+            EbmlElement(WRITING_APP, EbmlValue::String(crate::NAME)),
+            EbmlElement(MUXING_APP, EbmlValue::String(crate::NAME)),
+        ]);
 
-        let children = [
-            EbmlElement(EBML_VERSION, EbmlValue::UInt(1)),
-            EbmlElement(EBML_READ_VERSION, EbmlValue::UInt(1)),
-            EbmlElement(EBML_DOC_MAX_ID_LENGTH, EbmlValue::UInt(4)),
-            EbmlElement(EBML_DOC_MAX_SIZE_LENGTH, EbmlValue::UInt(8)),
-            EbmlElement(EBML_DOC_TYPE, EbmlValue::String("matroska".into())),
-            EbmlElement(EBML_DOC_TYPE_VERSION, EbmlValue::UInt(1)),
-        ];
-        let tracks = EbmlMasterElement(TRACKS, &[]);
-
-        let total_size = header.full_size() + segment.size() + segment_len.size();
+        let total_size = ebml_header.full_size() + segment.size() + segment_len.size() + info.full_size();
 
         let span = scratch.write(total_size as usize, |mut buf| {
-            header.write(&mut buf);
+            ebml_header.write(&mut buf);
             segment.write(&mut buf);
             segment_len.write(&mut buf);
+            info.write(&mut buf);
         })?;
 
-        Ok(span)
+        let tracks = get_tracks(movie, scratch)?;
+
+        Ok([span, tracks].into_iter().collect())
     }
     fn write(&mut self, scratch: &mut ScratchMemory, packet: &Packet) -> Result<Span, MuxerError> {
         todo!()
@@ -58,6 +53,13 @@ impl Muxer2 for MatroskaMuxer {
     fn stop(&mut self) -> Result<Span, MuxerError> {
         todo!()
     }
+}
+
+pub fn make_id_span(
+    id: EbmlId,
+    scratch: &mut ScratchMemory,
+) -> Result<Span<'static>, MuxerError> {
+    scratch.write(id.size() as _, |mut buf| id.write(&mut buf))
 }
 
 pub fn make_length_span(
@@ -72,9 +74,10 @@ pub fn make_element(
     scratch: &mut ScratchMemory,
     content: Span<'static>,
 ) -> Result<Span<'static>, MuxerError> {
+    let id = make_id_span(id, scratch)?;
     let length = make_length_span(EbmlLength::Known(content.len() as _), scratch)?;
 
-    Ok([length, content].into_iter().collect())
+    Ok([id, length, content].into_iter().collect())
 }
 
 fn to_mkv_codec_id(id: CodecId) -> &'static str {
@@ -95,26 +98,32 @@ fn get_tracks<'a>(
     for track in &movie.tracks {
         let codec_id = track.info.codec_id;
 
-        if codec_id.is_video() {
 
-        }
-
-        let children = [
+        let mut children = vec![
             EbmlElement(TRACK_NUMBER, EbmlValue::UInt(track.id as u64)),
             EbmlElement(TRACK_UID, EbmlValue::UInt(track.id as u64)),
             EbmlElement(CODEC_ID, EbmlValue::String(to_mkv_codec_id(track.info.codec_id))),
+            EbmlElement(CODEC_PRIVATE, EbmlValue::Binary(track.info.codec_private.clone())),
         ];
+
+        let video_children = [
+            EbmlElement(PIXEL_WIDTH, EbmlValue::UInt(track.info.width as u64)),
+            EbmlElement(PIXEL_HEIGHT, EbmlValue::UInt(track.info.height as u64)),
+            EbmlElement(FLAG_INTERLACED, EbmlValue::UInt(2)),
+        ];
+
+        if codec_id.is_video() {
+            children.push(EbmlElement(VIDEO, EbmlValue::Children(&video_children)));
+        }
         let element = EbmlMasterElement(
             TRACK_ENTRY,
             &children,
         );
 
-        let content = scratch.write(element.full_size() as _, |mut buf| element.write(&mut buf))?;
+        let content = scratch.write(element.full_size() as _, |mut buf| { element.write(&mut buf)})?;
 
-        tracks.push(make_element(TRACK_ENTRY, scratch, content)?);
+        tracks.push(content);
     }
 
-    make_element(TRACKS, scratch, tracks.into_iter().collect());
-
-    todo!()
+    make_element(TRACKS, scratch, tracks.into_iter().collect())
 }

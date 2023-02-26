@@ -9,7 +9,7 @@ use downcast::{downcast, Any};
 use fluent_uri::Uri;
 
 use std::{
-    io::{Seek, SeekFrom},
+    io::SeekFrom,
     path::Path,
 };
 

@@ -1,4 +1,4 @@
-#![feature(str_split_as_str, write_all_vectored, try_blocks)] // used by ASS decoder
+#![feature(str_split_remainder, write_all_vectored, try_blocks)] // used by ASS decoder
 #![allow(unused_variables)]
 #![allow(dead_code)]
 
@@ -7,6 +7,8 @@ use codec::{
     CodecDescription, Decoder, DecoderMetadata, Encoder, EncoderMetadata, SubtitleDescription,
 };
 use std::{collections::HashMap, fmt};
+
+const NAME: &str = concat!(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
 // #[cfg(test)]
 // mod test;

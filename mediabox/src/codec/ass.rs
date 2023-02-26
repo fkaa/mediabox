@@ -58,12 +58,12 @@ impl Decoder for AssDecoder {
         let _margin_r = entries.next().ok_or(AssError::MissingField("MarginR"))?;
         let _margin_v = entries.next().ok_or(AssError::MissingField("MarginV"))?;
         let _effect = entries.next().ok_or(AssError::MissingField("Effect"))?;
-        let text = entries.as_str();
+        let text = entries.remainder();
 
         let cue = TextCue {
             time: pkt.time.clone(),
             style: style.to_string(),
-            text: parse_ass_text(text),
+            text: parse_ass_text(text.unwrap()),
         };
 
         self.cues.push_back(cue);

@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::{SeekFrom, Write},
-    mem,
 };
 
 use crate::format::mkv::MatroskaMuxer;

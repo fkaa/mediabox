@@ -1,7 +1,7 @@
 use std::cmp;
 use std::io::{self, Seek, SeekFrom};
-use std::iter;
-use std::iter::Iterator;
+
+
 
 use crate::io::SyncReader;
 

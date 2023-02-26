@@ -51,10 +51,10 @@ pub struct DemuxerContext {
 
 fn convert_packet<'a>(
     pool: &mut MemoryPool,
-    mut memory: &Memory,
-    mut packet: Option<Packet<'a>>,
+    memory: &Memory,
+    packet: Option<Packet<'a>>,
 ) -> Option<Packet<'static>> {
-    if let Some(mut pkt) = packet {
+    if let Some(pkt) = packet {
         // let mut new_memory = pool.alloc(memory.len());
         // let mut span = Span::default();
 
@@ -124,7 +124,7 @@ impl DemuxerContext {
                 let result = self.demuxer.read_packet(data, &mut self.reader);
 
                 match result {
-                    Ok(mut pkt) => {
+                    Ok(pkt) => {
                         let mut pkt = convert_packet(&mut self.pool, &self.memory, pkt);
 
                         if let Some(ref mut pkt) = &mut pkt {

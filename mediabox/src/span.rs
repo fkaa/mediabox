@@ -198,11 +198,11 @@ impl<'a> Span<'a> {
     }
 
     pub fn make_static<F: FnMut(Span<'a>) -> Span<'static>>(
-        mut self,
+        self,
         func: &mut F,
     ) -> Span<'static> {
         match self {
-            Span::Many(mut spans) => spans.into_iter().map(func).collect(),
+            Span::Many(spans) => spans.into_iter().map(func).collect(),
             span @ _ => func(span),
         }
     }
@@ -221,7 +221,7 @@ impl<'a> Span<'a> {
         });
     }
 
-    pub fn unrealize_from_memory(mut self, memory: &Memory) -> Span<'static> {
+    pub fn unrealize_from_memory(self, memory: &Memory) -> Span<'static> {
         self.make_static(&mut |span| match span {
             Span::Slice(slice) => {
                 let len = slice.len();
@@ -266,11 +266,15 @@ impl<'a> Span<'a> {
 
     /// The length of the span.
     pub fn len(&self) -> usize {
-        let mut len = 0;
-
-        self.visit(&mut |b| len += b.len());
-
-        len
+        match self {
+            Span::Many(spans) => {
+                spans.iter().map(|s| s.len()).sum::<usize>()
+            }
+            Span::RefCounted { start, end, .. } => end - start,
+            Span::NonRealizedMemory { start, end, .. } => end - start,
+            Span::Single(span) => span.len(),
+            Span::Slice(span) => span.len(),
+        }
     }
 
     #[must_use]

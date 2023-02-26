@@ -165,11 +165,10 @@ pub enum CodecId {
 impl CodecId {
     pub fn name(&self) -> &'static str {
         match self {
-            CodecId::Unknown => "unknown",
             CodecId::H264 => "H.264",
             CodecId::Aac => "AAC",
             CodecId::WebVtt => "WebVTT",
-            _ => "unknown",
+            CodecId::Unknown => "unknown",
         }
     }
 }

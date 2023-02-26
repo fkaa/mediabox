@@ -1,5 +1,5 @@
 use mediabox::format::*;
-use mediabox::io::*;
+
 use mediabox::memory::*;
 
 #[global_allocator]
@@ -14,7 +14,7 @@ fn main() {
         max_capacity: None,
         default_memory_capacity: 1024,
     };
-    let mut pool = MemoryPool::new(config);
+    let pool = MemoryPool::new(config);
 
     let mut demuxer =
         DemuxerContext::open_with_pool("./tests/files/testsrc-h264.mkv", pool.clone()).unwrap();
