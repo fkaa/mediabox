@@ -1,5 +1,5 @@
-use mediabox::format::mp4::*;
-use mediabox::format::rtmp::*;
+//use mediabox::format::mp4::*;
+//use mediabox::format::rtmp::*;
 use mediabox::format::*;
 use mediabox::io::*;
 
@@ -7,7 +7,7 @@ use mediabox::io::*;
 async fn main() {
     env_logger::init();
 
-    let mut listener = RtmpListener::bind("127.0.0.1:1935")
+    /*let mut listener = RtmpListener::bind("127.0.0.1:1935")
         .await
         .expect("Failed to bind RTMP listener");
 
@@ -47,5 +47,5 @@ async fn main() {
                     .expect("Failed to write packet to muxer");
             }
         });
-    }
+    }*/
 }

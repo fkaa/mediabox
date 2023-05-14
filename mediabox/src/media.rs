@@ -1,4 +1,5 @@
 use std::fmt::{self, Display};
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -160,6 +161,7 @@ pub enum CodecId {
     H264,
     Aac,
     WebVtt,
+    Ass,
 }
 
 impl CodecId {
@@ -168,6 +170,7 @@ impl CodecId {
             CodecId::H264 => "H.264",
             CodecId::Aac => "AAC",
             CodecId::WebVtt => "WebVTT",
+            CodecId::Ass => "ASS",
             CodecId::Unknown => "unknown",
         }
     }
@@ -381,12 +384,49 @@ impl From<MediaDuration> for Duration {
 /// Any piece of media needs to have a time. Some media can be delivered "out-of-order" (eg.
 /// B-frames) which requires a media time to have two timestamps; a presentation time (pts) and a
 /// decode time (dts).
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct MediaTime {
     pub pts: u64,
     pub dts: Option<u64>,
     pub duration: Option<u64>,
     pub timebase: Fraction,
+}
+
+impl From<Range<Duration>> for MediaTime {
+    fn from(value: Range<Duration>) -> Self {
+        let duration = value.end - value.start;
+
+        MediaTime {
+            pts: (value.start.as_secs_f64() * 1000.0) as u64,
+            dts: None,
+            duration: Some((duration.as_secs_f64() * 1000.0) as u64),
+            timebase: Fraction::new(1, 1000),
+        }
+    }
+}
+
+impl From<Range<f64>> for MediaTime {
+    fn from(value: Range<f64>) -> Self {
+        let duration = value.end - value.start;
+
+        MediaTime {
+            pts: (value.start * 1000.0) as u64,
+            dts: None,
+            duration: Some((duration * 1000.0) as u64),
+            timebase: Fraction::new(1, 1000),
+        }
+    }
+}
+
+impl MediaTime {
+    pub fn pts_in_seconds(&self) -> f64 {
+        self.pts as f64 / self.timebase.denominator as f64
+    }
+
+    pub fn duration_in_seconds(&self) -> Option<f64> {
+        self.duration
+            .map(|d| d as f64 / self.timebase.denominator as f64)
+    }
 }
 
 impl std::ops::Sub for &MediaTime {

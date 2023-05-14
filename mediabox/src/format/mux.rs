@@ -1,9 +1,13 @@
 use std::{
     fs::File,
-    io::{SeekFrom, Write},
+    io::{self, SeekFrom, Write},
 };
 
-use crate::format::mkv::MatroskaMuxer;
+use crate::{
+    format::{ass::AssMuxer, mkv::MatroskaMuxer, Demuxer2},
+    memory::MemoryPoolConfig,
+    MediaTime,
+};
 use crate::{io::SyncWriter, memory::MemoryPool, Packet, Span};
 
 use super::Movie;
@@ -27,8 +31,27 @@ pub struct SyncMuxerContext {
 }
 
 impl SyncMuxerContext {
+    pub fn open_with_writer(muxer: Box<dyn Muxer2>, write: SyncWriter) -> anyhow::Result<Self> {
+        let config = MemoryPoolConfig {
+            max_capacity: None,
+            default_memory_capacity: 1024,
+        };
+        let pool = MemoryPool::new(config);
+
+        Ok(SyncMuxerContext {
+            muxer,
+            pool,
+            write,
+            scratch_size: 4096,
+        })
+    }
+
     pub fn open_with_pool(uri: &str, pool: MemoryPool) -> anyhow::Result<Self> {
-        let muxer = MatroskaMuxer::create();
+        let muxer = if uri.ends_with(".mkv") {
+            MatroskaMuxer::create()
+        } else {
+            AssMuxer::create()
+        };
         let write = SyncWriter::Seekable(Box::new(File::create(uri)?));
 
         Ok(SyncMuxerContext {
@@ -66,14 +89,18 @@ impl SyncMuxerContext {
         }
     }
 
-    pub fn write(&mut self, packet: &Packet) -> anyhow::Result<()> {
+    pub fn write(&mut self, packet: &Packet<'static>) -> anyhow::Result<()> {
         loop {
             let mut memory = self.pool.alloc(self.scratch_size);
             let mut scratch = ScratchMemory::new(&mut memory);
 
             match self.muxer.write(&mut scratch, packet) {
-                Ok(span) => {
-                    todo!()
+                Ok(mut span) => {
+                    span.realize_with_memory(memory);
+                    let mut slices = span.to_io_slice();
+                    self.write.write_all_vectored(&mut slices)?;
+
+                    return Ok(());
                 }
                 Err(MuxerError::NeedMore(more)) => {
                     self.scratch_size += more;
@@ -125,7 +152,11 @@ impl<'a> ScratchMemory<'a> {
 
 pub trait Muxer2 {
     fn start(&mut self, scratch: &mut ScratchMemory, movie: &Movie) -> Result<Span, MuxerError>;
-    fn write(&mut self, scratch: &mut ScratchMemory, packet: &Packet) -> Result<Span, MuxerError>;
+    fn write(
+        &mut self,
+        scratch: &mut ScratchMemory,
+        packet: &Packet<'static>,
+    ) -> Result<Span, MuxerError>;
     fn stop(&mut self) -> Result<Span, MuxerError>;
 
     fn create() -> Box<dyn Muxer2>

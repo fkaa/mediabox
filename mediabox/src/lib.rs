@@ -10,8 +10,9 @@ use std::{collections::HashMap, fmt};
 
 const NAME: &str = concat!(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
-// #[cfg(test)]
-// mod test;
+#[cfg(test)]
+#[macro_use]
+mod test;
 
 pub mod media;
 pub mod memory;
@@ -39,6 +40,7 @@ pub struct MediaContext {
 impl MediaContext {
     pub fn register_all(&mut self) {
         self.register_demuxers();
+        self.register_decoders();
     }
 
     pub fn register_demuxers(&mut self) {
@@ -46,6 +48,14 @@ impl MediaContext {
 
         for meta in demuxers {
             self.demuxer_meta.insert(meta.name.to_string(), meta);
+        }
+    }
+
+    pub fn register_decoders(&mut self) {
+        let decoders = [codec::ass::META];
+
+        for meta in decoders {
+            self.decoder_meta.insert(meta.id, meta);
         }
     }
 
@@ -173,7 +183,7 @@ fn process_transcode<F: FnMut(Packet) + Send + 'static>(
     Ok(())
 }*/
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Eq, PartialEq)]
 pub struct Fraction {
     pub numerator: u32,
     pub denominator: u32,

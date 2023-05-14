@@ -87,6 +87,11 @@ impl Span<'static> {
 }
 
 impl<'a> Span<'a> {
+    pub fn from_memory(memory: Memory, start: usize, end: usize) -> Span<'static> {
+        let memory = Arc::new(memory);
+
+        Span::RefCounted { memory, start, end }
+    }
     pub fn slice(&self, range: impl RangeBounds<usize>) -> Self {
         match self {
             Span::Many(_)
@@ -197,10 +202,7 @@ impl<'a> Span<'a> {
         }
     }
 
-    pub fn make_static<F: FnMut(Span<'a>) -> Span<'static>>(
-        self,
-        func: &mut F,
-    ) -> Span<'static> {
+    pub fn make_static<F: FnMut(Span<'a>) -> Span<'static>>(self, func: &mut F) -> Span<'static> {
         match self {
             Span::Many(spans) => spans.into_iter().map(func).collect(),
             span @ _ => func(span),
@@ -267,9 +269,7 @@ impl<'a> Span<'a> {
     /// The length of the span.
     pub fn len(&self) -> usize {
         match self {
-            Span::Many(spans) => {
-                spans.iter().map(|s| s.len()).sum::<usize>()
-            }
+            Span::Many(spans) => spans.iter().map(|s| s.len()).sum::<usize>(),
             Span::RefCounted { start, end, .. } => end - start,
             Span::NonRealizedMemory { start, end, .. } => end - start,
             Span::Single(span) => span.len(),

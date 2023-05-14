@@ -85,26 +85,27 @@ pub enum MkvError {
 
 #[cfg(test)]
 mod test {
-    /*use std::io::Cursor;
+    use std::io::Cursor;
 
     use test_case::test_case;
 
     use crate::{
-        format::Muxer,
+        format::mux::Muxer2,
+        format::SyncMuxerContext,
         io::Io,
         test::{self, TestFile},
-        test_files,
     };
 
-    use super::{MatroskaDemuxer, MatroskaMuxer};*/
+    use super::{MatroskaDemuxer, MatroskaMuxer};
 
-    /*test_files! {
-        #[tokio::test]
-        async fn write_read_packets_are_equal(test_file: TestFile) {
-            let (movie, packets) = test::read_mkv_from_path(test_file.path).await;
+    test_files! {
+        #[test]
+        fn write_read_packets_are_equal(test_file: TestFile) {
+            let (movie, packets) = test::read_mkv_from_path(test_file.path);
             println!("read movie");
 
-            let io = Io::from_stream(Box::new(Vec::<u8>::new()));
+            let mut muxer = SyncMuxerContext::open_with_writer(MatroskaMuxer::create(), ).unwrap();
+            /*let io = Io::from_stream(Box::new(Vec::<u8>::new()));
             let mut muxer = MatroskaMuxer::new(io);
 
             test::write_movie_and_packets(&mut muxer, movie, &packets).await;
@@ -114,9 +115,9 @@ mod test {
             let buffer = Box::new(Cursor::new(*buffer));
             let mut demuxer  = MatroskaDemuxer::new(Io::from_reader(buffer));
 
-            let (new_movie, new_packets) = test::read_movie_and_packets(&mut demuxer).await;
+            let (new_movie, new_packets) = test::read_movie_and_packets(&mut demuxer).await;*/
 
             // TODO: assert
         }
-    }*/
+    }
 }

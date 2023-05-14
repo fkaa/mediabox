@@ -1,8 +1,6 @@
 use std::cmp;
 use std::io::{self, Seek, SeekFrom};
 
-
-
 use crate::io::SyncReader;
 
 /// Partial consumption buffer for any reader.
@@ -70,6 +68,10 @@ impl GrowableBufferedReader {
 
     pub fn data<'a>(&self, buf: &'a [u8]) -> &'a [u8] {
         &buf[self.pos..self.end]
+    }
+
+    pub fn len(&self) -> usize {
+        self.end - self.pos
     }
 
     pub fn fill_buf(&mut self, buf: &mut [u8]) -> io::Result<()> {
@@ -211,7 +213,8 @@ mod test {
     fn buffered_reader(capacity: usize, data: &'static [u8], ops: &[Op]) {
         let cur = Cursor::new(data);
         let reader = SyncReader::Seekable(Box::new(cur));
-        let (mut reader, mut buf) = GrowableBufferedReader::with_capacity(capacity, reader);
+        let (mut reader) = GrowableBufferedReader::new(reader);
+        let mut buf = vec![0u8; capacity];
 
         for op in ops {
             match op {

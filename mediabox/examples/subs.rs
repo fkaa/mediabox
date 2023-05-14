@@ -8,7 +8,7 @@ use tokio::fs::File;
 
 use std::{env, str};
 
-fn transcode_subtitles(cxt: &MediaContext, track: &Track) -> Option<(u32, Transcode)> {
+/*fn transcode_subtitles(cxt: &MediaContext, track: &Track) -> Option<(u32, Transcode)> {
     (track.info.name != "webvtt").then(|| {
         (
             track.id,
@@ -18,13 +18,13 @@ fn transcode_subtitles(cxt: &MediaContext, track: &Track) -> Option<(u32, Transc
             },
         )
     })
-}
+}*/
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let mut cxt = MediaContext::default();
+    /*let mut cxt = MediaContext::default();
     cxt.register_all();
 
     let path = env::args().nth(1).expect("Provide a file");
@@ -59,5 +59,5 @@ async fn main() {
             })
             .await
             .unwrap();
-    }
+    }*/
 }

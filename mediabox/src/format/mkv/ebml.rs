@@ -62,12 +62,12 @@ impl<'a> EbmlValue<'a> {
             EbmlValue::String(string) => buf.put_slice(string.as_bytes()),
             EbmlValue::Binary(binary) => {
                 binary.visit(&mut |b| buf.put_slice(b));
-            },
+            }
             EbmlValue::Children(el) => {
                 for el in *el {
                     el.write(buf);
                 }
-            },
+            }
         }
     }
 }
@@ -498,6 +498,18 @@ pub fn ebml_element_header<'a>(
     move |input| pair(ebml_vid, ebml_len)(input)
 }
 
+pub fn ebml_match<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], &'a [u8], EbmlError> {
+    ebml_element(id, |size| {
+        move |input: &'a [u8]| {
+            let size = size.require()?;
+
+            let (remaining, bytes) = take(size)(input)?;
+
+            Ok((remaining, bytes))
+        }
+    })
+}
+
 pub fn ebml_uint<'a>(id: EbmlId) -> impl Fn(&'a [u8]) -> IResult<&'a [u8], u64, EbmlError> {
     ebml_element(id, |size| {
         move |input: &'a [u8]| {
@@ -687,7 +699,7 @@ fn uint_element_bytes_required(value: u64) -> u8 {
     (value.ilog2() as u8) / 8
 }
 
-fn vint_bytes_required(value: u64) -> u64 {
+pub fn vint_bytes_required(value: u64) -> u64 {
     if value == 0 {
         return 1;
     }

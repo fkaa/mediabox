@@ -23,6 +23,13 @@ pub enum SyncWriter {
     Seekable(Box<dyn SyncWriteSeek>),
     Stream(Box<dyn Write>),
 }
+
+impl SyncWriter {
+    pub fn from_write<T: Into<Box<dyn Write>>>(write: T) -> Self {
+        SyncWriter::Stream(write.into())
+    }
+}
+
 impl Seek for SyncWriter {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         match self {
@@ -31,8 +38,8 @@ impl Seek for SyncWriter {
         }
     }
 }
-impl ::std::io::Write for SyncWriter {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+impl Write for SyncWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         match self {
             SyncWriter::Seekable(writer) => writer.write(bytes),
             SyncWriter::Stream(writer) => writer.write(bytes),

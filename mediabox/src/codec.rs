@@ -1,6 +1,6 @@
 use std::{collections::HashMap, fmt};
 
-use crate::{MediaInfo, MediaTime, Packet, Track};
+use crate::{CodecId, MediaInfo, MediaTime, Packet, Track};
 
 pub mod ass;
 pub mod h264;
@@ -10,9 +10,10 @@ pub mod webvtt;
 /// Registers a decoder with mediabox
 #[macro_export]
 macro_rules! decoder {
-    ($name:literal, $create:expr) => {
-        const META: crate::codec::DecoderMetadata = crate::codec::DecoderMetadata {
+    ($name:literal, $id:expr, $create:expr) => {
+        pub(crate) const META: crate::codec::DecoderMetadata = crate::codec::DecoderMetadata {
             name: $name,
+            id: $id,
             create: $create,
         };
     };
@@ -22,7 +23,7 @@ macro_rules! decoder {
 #[macro_export]
 macro_rules! encoder {
     ($name:literal, $create:expr) => {
-        const META: EncoderMetadata = EncoderMetadata {
+        pub(crate) const META: EncoderMetadata = EncoderMetadata {
             name: $name,
             create: $create,
         };
@@ -44,6 +45,7 @@ pub trait Encoder {
 #[derive(Clone)]
 pub struct DecoderMetadata {
     pub(crate) name: &'static str,
+    pub(crate) id: CodecId,
     create: fn() -> Box<dyn Decoder>,
 }
 
@@ -78,6 +80,7 @@ impl CodecDescription {
 }
 
 /// Result from decoding a [`Packet`].
+#[derive(Debug)]
 pub enum Decoded {
     Subtitle(TextCue),
 }
@@ -160,6 +163,7 @@ pub struct TextStyle {
 pub struct TextCue {
     pub time: MediaTime,
     pub style: String,
+    pub name: String,
     pub text: Vec<TextPart>,
 }
 

@@ -87,7 +87,8 @@ impl Demuxer2 for MatroskaDemuxer {
     ) -> Result<Option<Packet<'a>>, DemuxerError> {
         loop {
             let (remaining, packet) = self.read_packet_internal(input)?;
-            buf.consume(slice_dist(input, remaining) as usize);
+            let dist = slice_dist(input, remaining) as usize;
+            buf.consume(dist);
 
             input = remaining;
 
@@ -136,15 +137,32 @@ impl MatroskaDemuxer {
 
                 Ok((remaining, None))
             }
+            self::BLOCK_GROUP => {
+                let (remaining, packet) = self.parse_block_group(input)?;
+
+                Ok((remaining, packet))
+            }
             self::SIMPLE_BLOCK => {
                 let len = len
                     .require()
                     .context("Expected simple block to have known length")?;
+                let header_len = slice_dist(input, remaining);
 
-                let (remaining, bytes) = take(len)(remaining)?;
-                let (_, blk) = read_simple_block(bytes)?;
+                let old = remaining;
+                let (remaining, header) = read_simple_block_header(remaining)?;
+                let read = slice_dist(old, remaining);
 
-                let packet = self.convert_block_to_packet(blk);
+                /*if header.track_number != 6 {
+                    return Err(DemuxerError::Seek(SeekFrom::Current(
+                        (header_len + len) as i64,
+                    )));
+                }*/
+
+                let (remaining, buffer_bytes) = take(len - read)(remaining)?;
+
+                let buffer = buffer_bytes;
+
+                let packet = self.convert_block_to_packet(header, Span::Slice(buffer), None);
 
                 Ok((remaining, packet))
             }
@@ -221,6 +239,9 @@ impl MatroskaDemuxer {
                 let scale = info.scale.unwrap_or(1000000);
 
                 self.timebase = Fraction::new(1, (scale / 1000) as u32);
+                for track in &mut self.movie.tracks {
+                    track.timebase = self.timebase.clone();
+                }
 
                 Ok((remaining, INFO))
             }
@@ -242,7 +263,35 @@ impl MatroskaDemuxer {
         }
     }
 
-    fn convert_block_to_packet<'a>(&self, blk: MkvSimpleBlock<'a>) -> Option<Packet<'a>> {
+    fn parse_block_group<'a>(
+        &self,
+        input: &'a [u8],
+    ) -> IResult<&'a [u8], Option<Packet<'a>>, EbmlError> {
+        let (remaining, block_group) =
+            ebml_master_element_fold(BLOCK_GROUP, MkvBlockGroup::default(), |acc, input| {
+                element!(&mut acc.block, ebml_match(BLOCK), input);
+                element!(&mut acc.duration, ebml_uint(BLOCK_DURATION), input);
+
+                Ok(())
+            })(input)?;
+
+        let block = block_group.block.unwrap();
+
+        let (block_remaining, header) = read_simple_block_header(block)?;
+        let buffer = block_remaining;
+
+        let mut packet =
+            self.convert_block_to_packet(header, Span::Slice(buffer), block_group.duration);
+
+        Ok((remaining, packet))
+    }
+
+    fn convert_block_to_packet<'a>(
+        &self,
+        blk: MkvSimpleBlockHeader,
+        buffer: Span<'a>,
+        duration: Option<u64>,
+    ) -> Option<Packet<'a>> {
         let track = self
             .movie
             .tracks
@@ -256,13 +305,11 @@ impl MatroskaDemuxer {
                 .checked_add_signed(blk.timestamp as i64)
                 .unwrap_or(0),
             dts: None,
-            duration: None,
+            duration: duration,
             timebase: track.timebase,
         };
 
         let key = (blk.flags & 0b1000_0000) != 0;
-
-        let buffer = Span::Slice(blk.buffer);
 
         Some(Packet {
             time,
@@ -274,27 +321,31 @@ impl MatroskaDemuxer {
 }
 
 #[derive(Clone, Debug, Default)]
-struct MkvSimpleBlock<'a> {
+struct MkvSimpleBlockHeader {
     track_number: u64,
     timestamp: i16,
     flags: u8,
-    buffer: &'a [u8],
 }
 
-fn read_simple_block<'a>(input: &'a [u8]) -> IResult<&'a [u8], MkvSimpleBlock<'a>, EbmlError> {
+#[derive(Clone, Default)]
+struct MkvBlockGroup<'a> {
+    block: Option<&'a [u8]>,
+    duration: Option<u64>,
+}
+
+fn read_simple_block_header<'a>(
+    input: &'a [u8],
+) -> IResult<&'a [u8], MkvSimpleBlockHeader, EbmlError> {
     let (input, track_number) = ebml_vint(input)?;
     let (input, timestamp) = be_i16(input)?;
     let (input, flags) = u8(input)?;
 
-    let buffer = input;
-
     Ok((
         input,
-        MkvSimpleBlock {
+        MkvSimpleBlockHeader {
             track_number,
             timestamp,
             flags,
-            buffer,
         },
     ))
 }
@@ -395,6 +446,7 @@ fn convert_codec_id(name: &str) -> CodecId {
         "V_MPEG4/ISO/AVC" => CodecId::H264,
         "A_AAC" => CodecId::Aac,
         "S_TEXT/WEBVTT" => CodecId::WebVtt,
+        "S_TEXT/ASS" => CodecId::Ass,
         _ => {
             debug!("Unrecognized codec {name:?}");
 
@@ -431,6 +483,7 @@ fn fill_audio_info(info: &mut MediaInfo, audio: MkvAudio) -> anyhow::Result<()> 
 }
 
 fn fill_subtitle_info(info: &mut MediaInfo, track: MkvTrack) -> anyhow::Result<()> {
+    info.codec_private = Span::from(mand(track.codec_private, CODEC_PRIVATE)?.to_vec());
     Ok(())
 }
 

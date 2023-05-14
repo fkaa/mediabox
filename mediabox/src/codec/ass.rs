@@ -1,14 +1,23 @@
 use super::{
-    ColorType, Decoded, Decoder, TextAlign, TextAlpha, TextCue, TextFill, TextPart, TextPosition,
-    TextStyle,
+    CodecId, ColorType, Decoded, Decoder, TextAlign, TextAlpha, TextCue, TextFill, TextPart,
+    TextPosition, TextStyle,
 };
-use crate::{decoder, MediaInfo, Packet};
+use crate::{decoder, Fraction, MediaInfo, MediaTime, Packet};
 
 use logos::{Lexer, Logos};
+use nom::{
+    branch::alt,
+    bytes::streaming::{tag, take_until, take_while},
+    character::{is_digit, streaming::char},
+    combinator::{map, map_res, opt},
+    Finish, IResult, Parser,
+};
 
-use std::{borrow::Borrow, collections::VecDeque, str};
+use std::{borrow::Borrow, collections::VecDeque, str, time::Duration};
 
-decoder!("ass", AssDecoder::create);
+decoder!("ass", CodecId::Ass, AssDecoder::create);
+
+const ASS_TIMEBASE: Fraction = Fraction::new(1, 1000);
 
 #[derive(Debug, thiserror::Error)]
 pub enum AssError {
@@ -40,6 +49,89 @@ impl Default for AssDecoder {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct AssLine<'a> {
+    pub time: Option<MediaTime>,
+    pub style: &'a str,
+    pub name: &'a str,
+    text: &'a str,
+}
+
+impl<'a> AssLine<'a> {
+    pub fn text(&self) -> Vec<AssText<'a>> {
+        todo!()
+    }
+}
+
+fn skip_field() -> impl FnMut(&str) -> IResult<&str, &str> {
+    |i| {
+        let (i, text) = take_until(",")(i)?;
+        let (i, _) = char(',')(i)?;
+        Ok((i, text))
+    }
+}
+
+pub fn parse_line<'a>(line: &'a str) -> IResult<&'a str, AssLine<'a>> {
+    use nom::character::streaming::u32;
+
+    // ASS lines can either start with 'Dialogue: ' (.ass) or read order (MKV)
+    let (i, _) = alt((tag("Dialogue: "), skip_field()))(line)?;
+    let (i, _layer) = u32(i)?;
+    let (i, _) = char(',')(i)?;
+    let (i, start_time) = opt(parse_total_milliseconds())(i)?;
+    let (i, end_time) = opt(parse_total_milliseconds())(i)?;
+    let (i, style) = skip_field()(i)?;
+    let (i, name) = skip_field()(i)?;
+    let (i, _margin_l) = skip_field()(i)?;
+    let (i, _margin_r) = skip_field()(i)?;
+    let (i, _margin_v) = skip_field()(i)?;
+    let (i, _effect) = skip_field()(i)?;
+    let text = i;
+
+    Ok((
+        i,
+        AssLine {
+            time: start_time.zip(end_time).map(|(start, end)| {
+                (Duration::from_millis(start)..Duration::from_millis(end)).into()
+            }),
+            style,
+            name,
+            text,
+        },
+    ))
+}
+
+fn from_digits(input: &[u8]) -> u64 {
+    let mut num = 0;
+
+    for n in input {
+        num *= 10;
+        num += (n - b'0') as u64;
+    }
+
+    num
+}
+
+pub fn parse_total_milliseconds() -> impl FnMut(&str) -> IResult<&str, u64> {
+    use nom::character::streaming::u64;
+
+    |line| {
+        let (i, hour) = u64(line)?;
+        let (i, _) = tag(":")(i)?;
+        let (i, minutes) = u64(i)?;
+        let (i, _) = tag(":")(i)?;
+        let (i, seconds) = u64(i)?;
+        let (i, _) = tag(":")(i)?;
+        let (i, hundreths) = u64(i)?;
+        let (i, _) = tag(",")(i)?;
+
+        Ok((
+            i,
+            (hour * 3600 + minutes * 60 + seconds) * 1000 + hundreths * 10,
+        ))
+    }
+}
+
 impl Decoder for AssDecoder {
     fn start(&mut self, info: &MediaInfo) -> anyhow::Result<()> {
         Ok(())
@@ -48,22 +140,14 @@ impl Decoder for AssDecoder {
     fn feed(&mut self, pkt: Packet) -> anyhow::Result<()> {
         let data = pkt.buffer.to_slice();
         let line = str::from_utf8(data.borrow())?;
-        let mut entries = line.split(',');
 
-        let read_order = entries.next().ok_or(AssError::MissingField("ReadOrder"))?;
-        let _layer = entries.next().ok_or(AssError::MissingField("Layer"))?;
-        let style = entries.next().ok_or(AssError::MissingField("Style"))?;
-        let name = entries.next().ok_or(AssError::MissingField("Name"))?;
-        let _margin_l = entries.next().ok_or(AssError::MissingField("MarginL"))?;
-        let _margin_r = entries.next().ok_or(AssError::MissingField("MarginR"))?;
-        let _margin_v = entries.next().ok_or(AssError::MissingField("MarginV"))?;
-        let _effect = entries.next().ok_or(AssError::MissingField("Effect"))?;
-        let text = entries.remainder();
+        let (_, line) = parse_line(line).map_err(|e| anyhow::anyhow!("{}", e.to_string()))?;
 
         let cue = TextCue {
             time: pkt.time.clone(),
-            style: style.to_string(),
-            text: parse_ass_text(text.unwrap()),
+            style: line.style.to_string(),
+            name: line.name.to_string(),
+            text: parse_ass_text(line.text),
         };
 
         self.cues.push_back(cue);
@@ -304,6 +388,7 @@ impl<'a> Iterator for AssParser<'a> {
 
 #[cfg(test)]
 mod test {
+    use super::parse_line;
     use super::Ass::*;
     use super::ColorType::*;
     use super::*;
@@ -393,5 +478,35 @@ mod test {
         let tokens = lexer.collect::<Vec<_>>();
 
         assert_eq!(&tokens[..], expected);
+    }
+
+    #[test_case(
+        "Dialogue: 0,0:00:16:70,0:00:18:93,Main,Perona,0,0,0,,crush your heart.",
+        AssLine {
+            time: Some((16.70..18.93).into()),
+            style: "Main",
+            name: "Perona",
+            text: "crush your heart.",
+        })]
+    #[test_case(
+        "Dialogue: 0,0:00:13:05,0:00:14:89,Main,,0,0,0,,is fading!",
+        AssLine {
+            time: Some((13.05..14.89).into()),
+            style: "Main",
+            name: "",
+            text: "is fading!",
+        })]
+    #[test_case(
+        "0,0,Lyrics,,0,0,0,,Let's pile up all the dreams,",
+        AssLine {
+            time: None,
+            style: "Lyrics",
+            name: "",
+            text: "Let's pile up all the dreams,"
+        })]
+    fn test_parse_line<'a>(line: &'a str, expected: AssLine<'a>) {
+        let (remaining, line) = parse_line(line).unwrap();
+
+        assert_eq!(line, expected);
     }
 }

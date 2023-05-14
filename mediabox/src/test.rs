@@ -1,8 +1,9 @@
 use tokio::fs::File;
 
 use crate::{
-    format::{mkv::MatroskaDemuxer, Demuxer, Movie, Muxer},
+    format::{mkv::MatroskaDemuxer, Demuxer, DemuxerContext, Movie, Muxer2},
     io::Io,
+    memory::{MemoryPool, MemoryPoolConfig},
     Packet,
 };
 
@@ -35,14 +36,31 @@ macro_rules! test_files {
     };
 }
 
-/*pub async fn read_mkv_from_path(path: &str) -> (Movie, Vec<Packet>) {
-    let file = File::open(path).await.unwrap();
-    let mut demuxer = MatroskaDemuxer::new(Io::from_reader(Box::new(file)));
+pub fn read_mkv_from_path(path: &str) -> (Movie, Vec<Packet>) {
+    let config = MemoryPoolConfig {
+        max_capacity: None,
+        default_memory_capacity: 1024,
+    };
+    let pool = MemoryPool::new(config);
 
-    read_movie_and_packets(&mut demuxer).await
+    let mut demuxer = DemuxerContext::open_with_pool(path, pool.clone()).unwrap();
+
+    read_movie_and_packets(&mut demuxer)
 }
 
-pub async fn read_mkv_from_io(io: Io) -> (Movie, Vec<Packet>) {
+pub fn read_movie_and_packets(demuxer: &mut DemuxerContext) -> (Movie, Vec<Packet>) {
+    let mut packets = Vec::new();
+
+    let movie = demuxer.read_headers().unwrap();
+
+    while let Some(pkt) = demuxer.read_packet().unwrap() {
+        packets.push(pkt);
+    }
+
+    (movie, packets)
+}
+
+/*pub async fn read_mkv_from_io(io: Io) -> (Movie, Vec<Packet>) {
     let mut demuxer = MatroskaDemuxer::new(io);
 
     read_movie_and_packets(&mut demuxer).await
@@ -56,15 +74,4 @@ pub async fn write_movie_and_packets(muxer: &mut dyn Muxer, movie: Movie, packet
     muxer.stop().await.unwrap();
 }
 
-pub async fn read_movie_and_packets(demuxer: &mut dyn Demuxer) -> (Movie, Vec<Packet>) {
-    let movie = demuxer.start().await.unwrap();
-    let mut packets = Vec::new();
-
-    while let Ok(pkt) = demuxer.read().await {
-        packets.push(pkt);
-    }
-
-    demuxer.stop().await.unwrap();
-
-    (movie, packets)
-}*/
+*/

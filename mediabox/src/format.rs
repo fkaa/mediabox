@@ -2,7 +2,7 @@ use std::{
     cmp::Ordering,
     fmt::Debug,
     fs::File,
-    io::{Seek, SeekFrom},
+    io::{ErrorKind, Seek, SeekFrom},
     mem,
 };
 
@@ -13,16 +13,17 @@ use crate::{
     buffer::{Buffered, GrowableBufferedReader},
     io::{Io, SyncReader},
     memory::{Memory, MemoryPool},
-    Packet, Span, Track,
+    CodecId, Packet, Span, Track,
 };
 
-use self::mkv::MatroskaDemuxer;
+use self::{ass::AssDemuxer, mkv::MatroskaDemuxer};
 
 mod mux;
 
 pub use mux::*;
 
 // pub mod hls;
+pub mod ass;
 pub mod mkv;
 // pub mod mp4;
 
@@ -49,29 +50,14 @@ pub struct DemuxerContext {
     memory: Memory,
 }
 
-fn convert_packet<'a>(
-    pool: &mut MemoryPool,
-    memory: &Memory,
-    packet: Option<Packet<'a>>,
-) -> Option<Packet<'static>> {
-    if let Some(pkt) = packet {
-        // let mut new_memory = pool.alloc(memory.len());
-        // let mut span = Span::default();
-
-        // mem::swap(memory, &mut new_memory);
-        // mem::swap(&mut span, &mut pkt.buffer);
-
-        let new_pkt = Packet {
-            key: pkt.key,
-            time: pkt.time,
-            track: pkt.track,
-            buffer: pkt.buffer.unrealize_from_memory(memory),
-        };
-
-        Some(new_pkt)
-    } else {
-        None
-    }
+fn convert_packet<'a>(pool: &mut MemoryPool, memory: &Memory, pkt: Packet<'a>) -> Packet<'static> {
+    let new_pkt = Packet {
+        key: pkt.key,
+        time: pkt.time,
+        track: pkt.track,
+        buffer: pkt.buffer.unrealize_from_memory(memory),
+    };
+    new_pkt
 }
 
 impl DemuxerContext {
@@ -80,7 +66,11 @@ impl DemuxerContext {
     }*/
 
     pub fn open_with_pool(url: &str, pool: MemoryPool) -> anyhow::Result<Self> {
-        let demuxer = MatroskaDemuxer::create();
+        let demuxer = if url.ends_with(".mkv") {
+            MatroskaDemuxer::create()
+        } else {
+            AssDemuxer::create()
+        };
 
         let reader = SyncReader::Seekable(Box::new(File::open(url)?));
         let reader = GrowableBufferedReader::new(reader);
@@ -124,18 +114,21 @@ impl DemuxerContext {
                 let result = self.demuxer.read_packet(data, &mut self.reader);
 
                 match result {
-                    Ok(pkt) => {
-                        let mut pkt = convert_packet(&mut self.pool, &self.memory, pkt);
+                    Ok(Some(pkt)) => {
+                        let pkt_len = pkt.buffer.len();
+                        let mut new_memory = self.pool.alloc(pkt_len);
+                        new_memory[..pkt_len].copy_from_slice(&pkt.buffer.to_slice());
 
-                        if let Some(ref mut pkt) = &mut pkt {
-                            let mut new_memory = self.pool.alloc(self.memory.len());
-                            mem::swap(&mut self.memory, &mut new_memory);
+                        let pkt = Packet {
+                            time: pkt.time,
+                            key: pkt.key,
+                            track: pkt.track,
+                            buffer: Span::from_memory(new_memory, 0, pkt_len),
+                        };
 
-                            pkt.buffer.realize_with_memory(new_memory);
-                        }
-
-                        return Ok(pkt);
+                        return Ok(Some(pkt));
                     }
+                    Ok(None) => return Ok(None),
                     Err(e) => e,
                 }
             };
@@ -146,7 +139,13 @@ impl DemuxerContext {
 
                 DemuxerError::NeedMore(more) => {
                     self.reader.ensure_additional(&mut self.memory, more);
-                    self.reader.fill_buf(&mut self.memory)?;
+                    if let Err(e) = self.reader.fill_buf(&mut self.memory) {
+                        if e.kind() == ErrorKind::UnexpectedEof {
+                            return Ok(None);
+                        }
+
+                        return Err(e.into());
+                    }
                 }
                 DemuxerError::Seek(seek) => {
                     debug!("seeking: {seek:?}");
