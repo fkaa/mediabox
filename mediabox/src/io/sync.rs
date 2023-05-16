@@ -1,5 +1,7 @@
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
+use downcast::{downcast, Any};
+
 pub trait SyncReadSeek: Read + Seek {}
 impl<T> SyncReadSeek for T where T: Read + Seek {}
 
@@ -16,17 +18,30 @@ impl Seek for SyncReader {
     }
 }
 
-pub trait SyncWriteSeek: Write + Seek {}
-impl<T> SyncWriteSeek for T where T: Write + Seek {}
+pub trait SyncWriteSeek: Any + Write + Seek + 'static {}
+impl<T> SyncWriteSeek for T where T: Any + Write + Seek + 'static {}
+
+pub trait SyncWrite: Any + Write + Seek + 'static {}
+impl<T> SyncWrite for T where T: Any + Write + Seek + 'static {}
+
+downcast!(dyn SyncWriteSeek);
+downcast!(dyn SyncWrite);
 
 pub enum SyncWriter {
-    Seekable(Box<dyn SyncWriteSeek>),
-    Stream(Box<dyn Write>),
+    Seekable(Box<dyn SyncWriteSeek + 'static>),
+    Stream(Box<dyn SyncWrite + 'static>),
 }
 
 impl SyncWriter {
-    pub fn from_write<T: Into<Box<dyn Write>>>(write: T) -> Self {
+    pub fn from_write<T: Into<Box<dyn SyncWrite>>>(write: T) -> Self {
         SyncWriter::Stream(write.into())
+    }
+
+    pub fn into_writer<T: 'static>(self) -> Box<T> {
+        match self {
+            SyncWriter::Seekable(writer) => writer.downcast().expect("Wrong type"),
+            SyncWriter::Stream(writer) => writer.downcast().expect("Wrong type"),
+        }
     }
 }
 
