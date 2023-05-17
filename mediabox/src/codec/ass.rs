@@ -268,9 +268,6 @@ fn strip_last<'a>(lex: &mut Lexer<'a, AssText<'a>>) -> Option<&'a str> {
 
 #[derive(Debug, PartialEq, Logos)]
 pub enum AssText<'a> {
-    #[error]
-    Error,
-
     #[regex(r"\\n", priority = 50)]
     LineBreak,
 
@@ -282,11 +279,8 @@ pub enum AssText<'a> {
 }
 
 #[derive(Debug, PartialEq, Logos)]
+#[logos(skip r"[ \t\n\f]+")]
 pub enum Ass<'a> {
-    #[regex(r"[ \t\n\f]+", logos::skip)]
-    #[error]
-    Error,
-
     #[regex(r"\\i\d", italics)]
     Italic(bool),
 
@@ -340,16 +334,15 @@ impl<'a> Iterator for AssParser<'a> {
 
     fn next(&mut self) -> Option<Ass<'a>> {
         loop {
-            if let Some(part) = self.text_lexer.next() {
+            if let Some(Ok(part)) = self.text_lexer.next() {
                 match part {
                     AssText::LineBreak => return Some(Ass::LineBreak),
                     AssText::SmartBreak => return Some(Ass::SmartBreak),
                     AssText::Text(txt) => return Some(Ass::Text(txt)),
-                    _ => {}
                 }
             }
 
-            if let Some(part) = self.lexer.next() {
+            if let Some(Ok(part)) = self.lexer.next() {
                 return Some(part);
             }
 
@@ -475,7 +468,7 @@ mod test {
 
         let lexer = AssText::lexer(ass);
 
-        let tokens = lexer.collect::<Vec<_>>();
+        let tokens = lexer.collect::<Result<Vec<_>, _>>().unwrap();
 
         assert_eq!(&tokens[..], expected);
     }

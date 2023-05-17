@@ -176,7 +176,7 @@ impl Demuxer2 for AssDemuxer {
 
     fn probe(data: &[u8]) -> ProbeResult {
         let patterns = &[&b"[Script Info]"[..], &b"aegisub"[..]];
-        let ac = AhoCorasick::new(patterns);
+        let ac = AhoCorasick::new(patterns).unwrap();
 
         let mut score = 0f32;
         for mat in ac.find_iter(data) {

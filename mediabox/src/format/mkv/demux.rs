@@ -105,7 +105,7 @@ impl Demuxer2 for MatroskaDemuxer {
             &SEGMENT.0.to_be_bytes()[..],
             &CLUSTER.0.to_be_bytes()[..],
         ];
-        let ac = AhoCorasick::new(patterns);
+        let ac = AhoCorasick::new(patterns).unwrap();
 
         let mut score = 0f32;
         for mat in ac.find_iter(data) {
