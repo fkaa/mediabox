@@ -1,12 +1,11 @@
 use std::{
     fs::File,
-    io::{self, SeekFrom, Write},
+    io::{SeekFrom, Write},
 };
 
 use crate::{
-    format::{ass::AssMuxer, mkv::MatroskaMuxer, Demuxer2},
+    format::{ass::AssMuxer, mkv::MatroskaMuxer},
     memory::MemoryPoolConfig,
-    MediaTime,
 };
 use crate::{io::SyncWriter, memory::MemoryPool, Packet, Span};
 
@@ -46,6 +45,10 @@ impl SyncMuxerContext {
         })
     }
 
+    pub fn into_writer<T: 'static>(self) -> Box<T> {
+        self.write.into_writer::<T>()
+    }
+
     pub fn open_with_pool(uri: &str, pool: MemoryPool) -> anyhow::Result<Self> {
         let muxer = if uri.ends_with(".mkv") {
             MatroskaMuxer::create()
@@ -71,6 +74,8 @@ impl SyncMuxerContext {
                 Ok(mut span) => {
                     span.realize_with_memory(memory);
                     let mut slices = span.to_io_slice();
+
+                    // println!("slices: {:02x?}", slices);
                     self.write.write_all_vectored(&mut slices)?;
 
                     return Ok(());
@@ -97,8 +102,12 @@ impl SyncMuxerContext {
             match self.muxer.write(&mut scratch, packet) {
                 Ok(mut span) => {
                     span.realize_with_memory(memory);
-                    let mut slices = span.to_io_slice();
-                    self.write.write_all_vectored(&mut slices)?;
+                    let slices = span.to_io_slice();
+                    for slice in slices {
+                        // println!("slice: {:02x?}", slice);
+                        self.write.write_all(&slice)?;
+                    }
+                    //self.write.write_all_vectored(&mut slices)?;
 
                     return Ok(());
                 }
@@ -126,7 +135,7 @@ impl<'a> ScratchMemory<'a> {
         ScratchMemory { buf, pos: 0 }
     }
 
-    pub fn write<F: FnOnce(&mut [u8])>(
+    pub fn write<F: FnOnce(&mut [u8]) -> &mut [u8]>(
         &mut self,
         len: usize,
         func: F,
@@ -137,7 +146,19 @@ impl<'a> ScratchMemory<'a> {
             return Err(MuxerError::NeedMore(end - self.buf.len()));
         }
 
-        func(&mut self.buf[self.pos..end]);
+        let buf = func(&mut self.buf[self.pos..end]);
+
+        if buf.len() > 0 {
+            panic!("Unused scratch memory ({})", buf.len());
+        }
+
+        /*println!(
+            "{}..{} ({}), {:02x?}",
+            self.pos,
+            end,
+            buf.len(),
+            &mut self.buf[self.pos..end]
+        );*/
 
         let span = Span::NonRealizedMemory {
             start: self.pos,

@@ -1,7 +1,6 @@
-use std::str::Utf8Error;
-
 use bytes::{BufMut, BytesMut};
 use nom::{bytes::streaming::take, error::ParseError, sequence::pair, IResult, Needed, Parser};
+use std::str::Utf8Error;
 
 use crate::{format::DemuxerError, io::Io, Span};
 
@@ -85,14 +84,14 @@ impl EbmlId {
 impl EbmlLength {
     pub fn size(&self) -> u64 {
         match self {
-            &EbmlLength::Known(length) => vint_bytes_required(length),
+            &EbmlLength::Known(length) => vint_bytes_required(length + 1),
             &EbmlLength::Unknown(bytes) => 1,
         }
     }
 
     pub fn write(&self, buf: &mut dyn BufMut) {
         match self {
-            &EbmlLength::Known(length) => write_vint(buf, length),
+            &EbmlLength::Known(length) => write_vlen(buf, length),
             &EbmlLength::Unknown(bytes) => buf.put_u8(0b1111_1111),
         }
     }
@@ -121,7 +120,7 @@ impl<'a> EbmlMasterElement<'a> {
 }
 
 impl<'a> EbmlElement<'a> {
-    fn full_size(&self) -> u64 {
+    pub fn full_size(&self) -> u64 {
         let content_size = self.size();
 
         self.0.size() + EbmlLength::Known(content_size).size() + content_size
@@ -132,6 +131,8 @@ impl<'a> EbmlElement<'a> {
     }
 
     pub fn write(&self, buf: &mut dyn BufMut) {
+        //dbg!(&self.0);
+        //dbg!(&self.1);
         self.0.write(buf);
         EbmlLength::Known(self.size()).write(buf);
 
@@ -181,7 +182,7 @@ macro_rules! write_ebml {
 
             let mut buf = bytes::BytesMut::with_capacity(8);
             $crate::format::mkv::ebml::write_vid(&mut buf, $id as u64);
-            $crate::format::mkv::ebml::write_vint(&mut buf, content.len() as u64);
+            $crate::format::mkv::ebml::write_vlen(&mut buf, content.len() as u64);
 
             [$crate::Span::from(buf.freeze()), content].into_iter().collect::<$crate::Span>()
         }
@@ -648,15 +649,27 @@ pub async fn vid(io: &mut Io) -> Result<(u8, u64), MkvError> {
     Ok((len as u8, value))
 }
 
+pub fn write_vlen(buf: &mut dyn BufMut, mut value: u64) {
+    let bytes_required = vint_bytes_required(value + 1);
+    value |= 1 << (bytes_required * 7);
+    for i in (0..bytes_required).rev() {
+        buf.put_u8(((value >> (i * 8)) & 0xff) as u8);
+    }
+}
+
 pub fn write_vint(buf: &mut dyn BufMut, mut value: u64) {
     let bytes_required = vint_bytes_required(value);
-    let len = 1 << (8 - bytes_required);
+    value |= 1 << (bytes_required * 7);
+    for i in (0..bytes_required).rev() {
+        buf.put_u8(((value >> (i * 8)) & 0xff) as u8);
+    }
+    // let len = 1 << (8 - bytes_required);
 
-    value |= len << ((bytes_required - 1) * 8);
+    // value |= len << ((bytes_required - 1) * 8);
 
-    let bytes = value.to_be_bytes();
+    // let bytes = value.to_be_bytes();
 
-    buf.put_slice(&bytes[8 - bytes_required as usize..]);
+    // buf.put_slice(&bytes[8 - bytes_required as usize..]);
 }
 
 pub fn write_vid(buf: &mut dyn BufMut, id: u64) {
@@ -667,19 +680,26 @@ pub fn write_vid(buf: &mut dyn BufMut, id: u64) {
     }
 }
 
-fn write_int_elem(buf: &mut dyn BufMut, mut value: i64) {
-    while value > 0 {
-        buf.put_u8((value & 0xff) as u8);
+fn write_int_elem(buf: &mut dyn BufMut, value: i64) {
+    let len = int_element_bytes_required(value) + 1;
 
-        value >>= 8;
+    for i in (0..len).rev() {
+        buf.put_u8(((value >> (i * 8)) & 0xff) as u8);
     }
 }
 
-fn write_uint_elem(buf: &mut dyn BufMut, mut value: u64) {
-    while value > 0 {
-        buf.put_u8((value & 0xff) as u8);
+// let len = 1 << (8 - bytes_required);
 
-        value >>= 8;
+// value |= len << ((bytes_required - 1) * 8);
+
+// let bytes = value.to_be_bytes();
+
+// buf.put_slice(&bytes[8 - bytes_required as usize..]);
+fn write_uint_elem(buf: &mut dyn BufMut, value: u64) {
+    let len = uint_element_bytes_required(value) + 1;
+
+    for i in (0..len).rev() {
+        buf.put_u8(((value >> (i * 8)) & 0xff) as u8);
     }
 }
 
@@ -690,6 +710,13 @@ fn int_element_bytes_required(value: i64) -> u8 {
 
     (value.ilog2() as u8) / 8
 }
+// let len = 1 << (8 - bytes_required);
+
+// value |= len << ((bytes_required - 1) * 8);
+
+// let bytes = value.to_be_bytes();
+
+// buf.put_slice(&bytes[8 - bytes_required as usize..]);
 
 fn uint_element_bytes_required(value: u64) -> u8 {
     if value == 0 {
@@ -702,6 +729,13 @@ fn uint_element_bytes_required(value: u64) -> u8 {
 pub fn vint_bytes_required(value: u64) -> u64 {
     if value == 0 {
         return 1;
+        // let len = 1 << (8 - bytes_required);
+
+        // value |= len << ((bytes_required - 1) * 8);
+
+        // let bytes = value.to_be_bytes();
+
+        // buf.put_slice(&bytes[8 - bytes_required as usize..]);
     }
 
     match value.ilog2() + 1 {
@@ -719,23 +753,29 @@ pub fn vint_bytes_required(value: u64) -> u64 {
 
 #[cfg(test)]
 mod test {
-    /*use super::*;
+    use super::*;
     use assert_matches::assert_matches;
-    use std::io::Cursor;
-    use test_case::test_case;*/
+    
+    use test_case::test_case;
 
-    /*#[test_case(&[0b1000_0010], 2)]
+    #[test_case(&[0b1000_0010], 2)]
     #[test_case(&[0b0100_0000, 0b0000_0010], 2)]
     #[test_case(&[0b0010_0000, 0b0000_0000, 0b0000_0010], 2)]
     #[test_case(&[0b0001_0000, 0b0000_0000, 0b0000_0000, 0b0000_0010], 2)]
-    #[tokio::test]
-    async fn test_vint(bytes: &[u8], expected: u64) {
-        let cursor = Cursor::new(bytes.to_vec());
-        let mut io = Io::from_reader(Box::new(cursor));
+    fn test_read_vint(bytes: &[u8], expected: u64) {
+        let result = ebml_vint(&bytes);
 
-        let value = super::vint(&mut io).await;
+        assert_matches!(result, Ok((remaining, value)) => {
+            assert_eq!(value, expected);
+        });
+    }
 
-        assert_matches!(value, Ok(expected));
+    #[test_case(127, &[0x40, 0x7f])]
+    fn test_write_vlen(value: u64, expected: &[u8]) {
+        let mut buf = BytesMut::new();
+        write_vlen(&mut buf, value);
+
+        assert_eq!(&buf[..], expected);
     }
 
     #[test_case(0)]
@@ -747,17 +787,38 @@ mod test {
     #[test_case(u32::max_value() as u64)]
     #[test_case(u32::max_value() as u64 + 1)]
     #[test_case((1u64 << 56) - 1)]
-    #[tokio::test]
-    async fn read_write_vint(expected_value: u64) {
+    fn test_read_write_vint(expected_value: u64) {
         let mut buf = BytesMut::new();
         write_vint(&mut buf, expected_value);
 
-        let mut io = Io::from_reader(Box::new(Cursor::new(buf.to_vec())));
-        let (_len, value) = super::vint(&mut io).await.unwrap();
+        let result = ebml_vint(&buf);
 
-        assert_eq!(expected_value, value);
+        assert_matches!(result, Ok((remaining, value)) => {
+            assert_eq!(value, expected_value);
+        });
     }
 
+    #[test_case(0)]
+    #[test_case(1)]
+    #[test_case(u8::max_value() as u64)]
+    #[test_case(u8::max_value() as u64 + 1)]
+    #[test_case(u16::max_value() as u64)]
+    #[test_case(u16::max_value() as u64 + 1)]
+    #[test_case(u32::max_value() as u64)]
+    #[test_case(u32::max_value() as u64 + 1)]
+    #[test_case((1u64 << 56) - 1)]
+    fn read_write_uint(expected_value: u64) {
+        let mut buf = BytesMut::new();
+        write_uint_elem(&mut buf, expected_value);
+
+        let value = buf
+            .iter()
+            .fold(0u64, |acc, val| (acc << 8u64) | *val as u64);
+
+        assert_eq!(value, expected_value);
+    }
+
+    /*
     #[test_case(EBML_HEADER as u64)]
     #[test_case(EBML_DOC_TYPE as u64)]
     #[test_case(SEGMENT as u64)]

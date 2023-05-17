@@ -5,8 +5,8 @@ use std::{
 
 use aho_corasick::AhoCorasick;
 use nom::{
-    bytes::streaming::{is_not, take_until, take_while},
-    character::streaming::{crlf, line_ending, not_line_ending},
+    bytes::streaming::{is_not, take_until},
+    character::streaming::line_ending,
 };
 
 use crate::{
@@ -69,6 +69,7 @@ impl Muxer2 for AssMuxer {
             //dbg!(buf.len());
             buf.write_all(b"\r\n").unwrap();
             //dbg!(buf.len());
+            buf
         })?;
 
         Ok(span)
@@ -94,7 +95,7 @@ fn write_ass_time(writer: &mut dyn Write, seconds: f64) -> io::Result<()> {
     // dbg!(seconds);
     let hours = (seconds / 3600.0) as u32;
     let minutes = ((seconds % 3600.0) / 60.0) as u32;
-    let seconds = (seconds % 60.0);
+    let seconds = seconds % 60.0;
     let hundreths = (seconds.fract() * 100.0) as u32;
     let seconds = seconds as u32;
 
@@ -110,7 +111,7 @@ pub struct AssDemuxer {
 impl Demuxer2 for AssDemuxer {
     fn read_headers(
         &mut self,
-        mut input: &[u8],
+        input: &[u8],
         buf: &mut dyn Buffered,
     ) -> Result<Movie, DemuxerError> {
         let (remaining, codec_private) = take_until(&b"[Events]"[..])(input)?;

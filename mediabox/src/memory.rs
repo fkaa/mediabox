@@ -196,7 +196,7 @@ mod test {
             max_capacity: Some(1),
             default_memory_capacity: 1024,
         };
-        let mut pool = MemoryPool::new(config);
+        let pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(1024);
         assert!(first.is_some());
@@ -211,7 +211,7 @@ mod test {
             max_capacity: Some(1),
             default_memory_capacity: 1024,
         };
-        let mut pool = MemoryPool::new(config);
+        let pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(1024);
         assert!(first.is_some());
@@ -231,7 +231,7 @@ mod test {
             max_capacity: Some(1),
             default_memory_capacity: 1024,
         };
-        let mut pool = MemoryPool::new(config);
+        let pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(1024);
         assert_matches!(first, Some(ref mem) => {
@@ -256,7 +256,7 @@ mod test {
             max_capacity: None,
             default_memory_capacity: 1024,
         };
-        let mut pool = MemoryPool::new(config);
+        let pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(size);
         assert_matches!(first, Some(mem) => {
@@ -270,7 +270,7 @@ mod test {
             max_capacity: None,
             default_memory_capacity: 1024,
         };
-        let mut pool = MemoryPool::new(config);
+        let pool = MemoryPool::new(config);
 
         let first = pool.try_alloc(512);
         assert_matches!(first, Some(mem) => {

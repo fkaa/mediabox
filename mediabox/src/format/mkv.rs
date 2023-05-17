@@ -85,26 +85,45 @@ pub enum MkvError {
 
 #[cfg(test)]
 mod test {
-    use std::io::Cursor;
-
+    use pretty_assertions::{assert_eq};
     use test_case::test_case;
 
     use crate::{
         format::mux::Muxer2,
         format::SyncMuxerContext,
-        io::Io,
+        format::{Demuxer2, DemuxerContext},
+        io::{SyncReader, SyncWrite, SyncWriter},
         test::{self, TestFile},
     };
+
+    use std::io::Cursor;
 
     use super::{MatroskaDemuxer, MatroskaMuxer};
 
     test_files! {
-        #[test]
         fn write_read_packets_are_equal(test_file: TestFile) {
             let (movie, packets) = test::read_mkv_from_path(test_file.path);
-            println!("read movie");
 
-            let mut muxer = SyncMuxerContext::open_with_writer(MatroskaMuxer::create(), ).unwrap();
+            let mut muxer = SyncMuxerContext::open_with_writer(
+                MatroskaMuxer::create(),
+                SyncWriter::from_write(Box::new(Vec::new()) as Box<dyn SyncWrite>)
+            ).unwrap();
+
+            test::write_movie_and_packets(&mut muxer, &movie, &packets);
+
+            let written_file = muxer.into_writer::<Vec<u8>>();
+
+            std::fs::write(&format!("test-{}", test_file.file_name), &*written_file).unwrap();
+
+            let mut demuxer = DemuxerContext::open_with_reader(MatroskaDemuxer::create(),
+                SyncReader::from_read(Cursor::new(*written_file))).unwrap();
+
+            let (parsed_movie, parsed_packets) = test::read_movie_and_packets(&mut demuxer);
+
+            assert_eq!(movie, parsed_movie);
+            assert_eq!(packets, parsed_packets);
+
+            // panic!("test");
             /*let io = Io::from_stream(Box::new(Vec::<u8>::new()));
             let mut muxer = MatroskaMuxer::new(io);
 

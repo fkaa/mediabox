@@ -7,10 +7,10 @@ use crate::{decoder, Fraction, MediaInfo, MediaTime, Packet};
 use logos::{Lexer, Logos};
 use nom::{
     branch::alt,
-    bytes::streaming::{tag, take_until, take_while},
-    character::{is_digit, streaming::char},
-    combinator::{map, map_res, opt},
-    Finish, IResult, Parser,
+    bytes::streaming::{tag, take_until},
+    character::streaming::char,
+    combinator::opt,
+    IResult,
 };
 
 use std::{borrow::Borrow, collections::VecDeque, str, time::Duration};

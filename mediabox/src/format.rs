@@ -3,7 +3,6 @@ use std::{
     fmt::Debug,
     fs::File,
     io::{ErrorKind, Seek, SeekFrom},
-    mem,
 };
 
 use async_trait::async_trait;
@@ -12,8 +11,8 @@ use tracing::debug;
 use crate::{
     buffer::{Buffered, GrowableBufferedReader},
     io::{Io, SyncReader},
-    memory::{Memory, MemoryPool},
-    CodecId, Packet, Span, Track,
+    memory::{Memory, MemoryPool, MemoryPoolConfig},
+    Packet, Span, Track,
 };
 
 use self::{ass::AssDemuxer, mkv::MatroskaDemuxer};
@@ -64,6 +63,24 @@ impl DemuxerContext {
     /*pub fn open(url: &str) -> anyhow::Result<Self> {
         Self::open_with_pool(url, MemoryPool::create
     }*/
+
+    pub fn open_with_reader(demuxer: Box<dyn Demuxer2>, read: SyncReader) -> anyhow::Result<Self> {
+        let reader = GrowableBufferedReader::new(read);
+
+        let config = MemoryPoolConfig {
+            max_capacity: None,
+            default_memory_capacity: 1024,
+        };
+        let pool = MemoryPool::new(config);
+        let memory = pool.alloc(0);
+
+        Ok(DemuxerContext {
+            demuxer,
+            reader,
+            pool,
+            memory,
+        })
+    }
 
     pub fn open_with_pool(url: &str, pool: MemoryPool) -> anyhow::Result<Self> {
         let demuxer = if url.ends_with(".mkv") {
@@ -260,7 +277,7 @@ impl PartialOrd for ProbeResult {
     }
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug, Clone, Eq, PartialEq)]
 pub struct Movie {
     pub tracks: Vec<Track>,
     pub attachments: Vec<Attachment>,
@@ -295,7 +312,7 @@ impl Movie {
     }*/
 }
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Attachment {
     pub name: String,
     pub mime: String,

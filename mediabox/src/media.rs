@@ -105,7 +105,7 @@ impl AudioCodec {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SoundType {
     Unknown,
     Mono,
@@ -209,7 +209,7 @@ impl Default for CodecId {
 }
 
 /// Defines properties about a type of media (eg. a video or audio track)
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Eq, PartialEq)]
 pub struct MediaInfo {
     pub codec_id: CodecId,
     pub codec_private: Span<'static>,
@@ -253,7 +253,7 @@ impl fmt::Debug for MediaInfo {
 }
 
 /// Description of a media track.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Track {
     pub id: u32,
     pub info: Arc<MediaInfo>,
@@ -275,7 +275,7 @@ impl Track {
 /// A media packet.
 ///
 /// A packet contains timestamped opaque data for a given track.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Packet<'a> {
     pub time: MediaTime,
     pub key: bool,

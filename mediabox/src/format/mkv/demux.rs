@@ -280,7 +280,7 @@ impl MatroskaDemuxer {
         let (block_remaining, header) = read_simple_block_header(block)?;
         let buffer = block_remaining;
 
-        let mut packet =
+        let packet =
             self.convert_block_to_packet(header, Span::Slice(buffer), block_group.duration);
 
         Ok((remaining, packet))
@@ -459,7 +459,7 @@ fn fill_video_info(info: &mut MediaInfo, track: MkvTrack) -> anyhow::Result<()> 
     let video = mand(track.video, VIDEO)?;
 
     info.width = mand(video.width, PIXEL_WIDTH)? as u32;
-    info.height = mand(video.width, PIXEL_HEIGHT)? as u32;
+    info.height = mand(video.height, PIXEL_HEIGHT)? as u32;
 
     match info.codec_id {
         CodecId::H264 => {

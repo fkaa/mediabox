@@ -8,10 +8,7 @@ use anyhow::Context;
 use downcast::{downcast, Any};
 use fluent_uri::Uri;
 
-use std::{
-    io::SeekFrom,
-    path::Path,
-};
+use std::{io::SeekFrom, path::Path};
 
 use crate::Span;
 

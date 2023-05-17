@@ -24,6 +24,14 @@ pub enum Span<'a> {
     },
 }
 
+impl<'a> PartialEq for Span<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.to_slice().eq(&other.to_slice())
+    }
+}
+
+impl<'a> Eq for Span<'a> {}
+
 impl<'a> Default for Span<'a> {
     fn default() -> Span<'static> {
         Span::Slice(&[])
@@ -214,6 +222,8 @@ impl<'a> Span<'a> {
 
         self.visit_mut(&mut |span| {
             if let Span::NonRealizedMemory { start, end } = span {
+                // println!("{}..{}, {:02x?}", start, end, &memory[*start..*end]);
+
                 *span = Span::RefCounted {
                     memory: memory.clone(),
                     start: *start,
@@ -245,7 +255,10 @@ impl<'a> Span<'a> {
 
     pub fn to_io_slice(&'a self) -> Vec<IoSlice<'a>> {
         let mut slices = Vec::new();
-        self.visit(&mut |b| slices.push(IoSlice::new(b)));
+        self.visit(&mut |b| {
+            // println!("{:02x?}", b);
+            slices.push(IoSlice::new(b));
+        });
         slices
     }
 
@@ -318,7 +331,7 @@ mod test {
     #[test_case(&[b"a", b"def", b"j"], 1.., b"defj")]
     #[test_case(&[b"a", b"def", b"j"], ..4, b"adef")]
     fn slice_memory(spans: &[&'static [u8]], slice: impl RangeBounds<usize>, expected: &[u8]) {
-        let mut pool = MemoryPool::new(MemoryPoolConfig {
+        let pool = MemoryPool::new(MemoryPoolConfig {
             max_capacity: None,
             default_memory_capacity: 0,
         });

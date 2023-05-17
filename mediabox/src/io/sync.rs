@@ -1,13 +1,31 @@
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, IoSlice, Read, Seek, SeekFrom, Write};
 
 use downcast::{downcast, Any};
 
-pub trait SyncReadSeek: Read + Seek {}
-impl<T> SyncReadSeek for T where T: Read + Seek {}
+pub trait SyncReadSeek: Any + Read + Seek {}
+impl<T> SyncReadSeek for T where T: Any + Read + Seek {}
+
+pub trait SyncRead: Any + Read {}
+impl<T> SyncRead for T where T: Any + Read {}
+
+downcast!(dyn SyncReadSeek);
+downcast!(dyn SyncRead);
 
 pub enum SyncReader {
     Seekable(Box<dyn SyncReadSeek>),
-    Stream(Box<dyn Read>),
+    Stream(Box<dyn SyncRead>),
+}
+impl SyncReader {
+    pub fn from_read<T: Into<Box<R>>, R: SyncRead>(read: T) -> Self {
+        SyncReader::Stream(read.into())
+    }
+
+    pub fn into_reader<T: 'static>(self) -> Box<T> {
+        match self {
+            SyncReader::Seekable(reader) => reader.downcast().expect("Wrong type"),
+            SyncReader::Stream(reader) => reader.downcast().expect("Wrong type"),
+        }
+    }
 }
 impl Seek for SyncReader {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
@@ -18,18 +36,18 @@ impl Seek for SyncReader {
     }
 }
 
-pub trait SyncWriteSeek: Any + Write + Seek + 'static {}
-impl<T> SyncWriteSeek for T where T: Any + Write + Seek + 'static {}
+pub trait SyncWriteSeek: Any + Write + Seek {}
+impl<T> SyncWriteSeek for T where T: Any + Write + Seek {}
 
-pub trait SyncWrite: Any + Write + Seek + 'static {}
-impl<T> SyncWrite for T where T: Any + Write + Seek + 'static {}
+pub trait SyncWrite: Any + Write {}
+impl<T> SyncWrite for T where T: Any + Write {}
 
 downcast!(dyn SyncWriteSeek);
 downcast!(dyn SyncWrite);
 
 pub enum SyncWriter {
-    Seekable(Box<dyn SyncWriteSeek + 'static>),
-    Stream(Box<dyn SyncWrite + 'static>),
+    Seekable(Box<dyn SyncWriteSeek>),
+    Stream(Box<dyn SyncWrite>),
 }
 
 impl SyncWriter {
@@ -60,6 +78,20 @@ impl Write for SyncWriter {
             SyncWriter::Stream(writer) => writer.write(bytes),
         }
     }
+
+    fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+        match self {
+            SyncWriter::Seekable(writer) => writer.write_vectored(bufs),
+            SyncWriter::Stream(writer) => writer.write_vectored(bufs),
+        }
+    }
+
+    /*fn is_write_vectored(&self) -> bool {
+        match self {
+            SyncWriter::Seekable(writer) => writer.is_write_vectored(),
+            SyncWriter::Stream(writer) => writer.is_write_vectored(),
+        }
+    }*/
 
     fn flush(&mut self) -> io::Result<()> {
         match self {

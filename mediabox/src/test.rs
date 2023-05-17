@@ -1,26 +1,24 @@
-use tokio::fs::File;
-
 use crate::{
-    format::{mkv::MatroskaDemuxer, Demuxer, DemuxerContext, Movie, Muxer2},
-    io::Io,
+    format::{DemuxerContext, Movie, SyncMuxerContext},
     memory::{MemoryPool, MemoryPoolConfig},
     Packet,
 };
 
 pub struct TestFile {
     pub path: &'static str,
+    pub file_name: &'static str,
 }
 
 impl TestFile {
-    pub fn new(path: &'static str) -> Self {
-        TestFile { path }
+    pub fn new(path: &'static str, file_name: &'static str) -> Self {
+        TestFile { path, file_name }
     }
 }
 
 #[macro_export]
 macro_rules! test_files2 {
     ($func:item ; $($name:literal),+) => {
-        $(#[test_case(TestFile::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/files/", $name)) ; $name)])*
+        $(#[test_case(TestFile::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/files/", $name), $name) ; $name)])*
         $func
     };
 }
@@ -48,7 +46,7 @@ pub fn read_mkv_from_path(path: &str) -> (Movie, Vec<Packet>) {
     read_movie_and_packets(&mut demuxer)
 }
 
-pub fn read_movie_and_packets(demuxer: &mut DemuxerContext) -> (Movie, Vec<Packet>) {
+pub fn read_movie_and_packets(demuxer: &mut DemuxerContext) -> (Movie, Vec<Packet<'static>>) {
     let mut packets = Vec::new();
 
     let movie = demuxer.read_headers().unwrap();
@@ -60,18 +58,21 @@ pub fn read_movie_and_packets(demuxer: &mut DemuxerContext) -> (Movie, Vec<Packe
     (movie, packets)
 }
 
+pub fn write_movie_and_packets(
+    muxer: &mut SyncMuxerContext,
+    movie: &Movie,
+    packets: &[Packet<'static>],
+) {
+    muxer.start(movie).unwrap();
+    for pkt in packets {
+        muxer.write(&pkt).unwrap();
+    }
+    // muxer.stop().unwrap();
+}
+
 /*pub async fn read_mkv_from_io(io: Io) -> (Movie, Vec<Packet>) {
     let mut demuxer = MatroskaDemuxer::new(io);
 
     read_movie_and_packets(&mut demuxer).await
 }
-
-pub async fn write_movie_and_packets(muxer: &mut dyn Muxer, movie: Movie, packets: &[Packet]) {
-    muxer.start(movie.tracks).await.unwrap();
-    for pkt in packets {
-        muxer.write(pkt.clone()).await.unwrap();
-    }
-    muxer.stop().await.unwrap();
-}
-
 */
