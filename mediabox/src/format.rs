@@ -26,8 +26,8 @@ pub mod ass;
 pub mod mkv;
 // pub mod mp4;
 
-// #[cfg(feature = "rtmp")]
-// pub mod rtmp;
+#[cfg(feature = "rtmp")]
+pub mod rtmp;
 // pub mod webvtt;
 
 /// Registers a demuxer with mediabox
@@ -117,6 +117,9 @@ impl DemuxerContext {
 
                     self.reader.seek(seek)?;
                 }
+                Err(DemuxerError::RequestWrite) => {
+                    todo!();
+                }
                 Err(DemuxerError::Misc(err)) => return Err(err),
                 Err(err @ DemuxerError::EndOfStream) => return Err(err.into()),
             }
@@ -164,6 +167,9 @@ impl DemuxerContext {
                         return Err(e.into());
                     }
                 }
+                DemuxerError::RequestWrite => {
+                    todo!();
+                }
                 DemuxerError::Seek(seek) => {
                     debug!("seeking: {seek:?}");
 
@@ -181,6 +187,10 @@ pub trait Demuxer2 {
         data: &'a [u8],
         buf: &mut dyn Buffered,
     ) -> Result<Option<Packet<'a>>, DemuxerError>;
+
+    fn writer_data(&mut self) -> Option<Span<'static>> {
+        None
+    }
 
     fn create() -> Box<dyn Demuxer2>
     where
@@ -209,6 +219,9 @@ pub enum DemuxerError {
     NeedMore(usize),
     #[error("")]
     Seek(SeekFrom),
+
+    #[error("")]
+    RequestWrite,
 
     #[error("End of stream")]
     EndOfStream,

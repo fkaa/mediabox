@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bytes::Bytes;
 use futures::{
     channel::mpsc::{channel, Receiver, Sender},
@@ -9,7 +10,7 @@ use h264_reader::{
     push::NalInterest,
 };
 use rml_rtmp::{
-    chunk_io::Packet,
+    chunk_io::Packet as RtmpPacket,
     handshake::{Handshake, HandshakeProcessResult, PeerType},
     sessions::{
         ServerSession, ServerSessionConfig, ServerSessionEvent, ServerSessionResult, StreamMetadata,
@@ -23,12 +24,196 @@ use tokio::net::{tcp, TcpListener, TcpStream, ToSocketAddrs};
 
 use std::{collections::VecDeque, io::Read, net::SocketAddr, sync::Arc};
 
-use crate::{codec::nal::BitstreamFraming, media, Fraction, Track};
+use crate::{
+    codec::nal::BitstreamFraming,
+    demuxer,
+    format::{Buffered, Demuxer2, DemuxerError, Movie},
+    media, Fraction, Packet, ProbeResult, Span, Track,
+};
 
 const RTMP_TIMEBASE: Fraction = Fraction::new(1, 1000);
 const RTMP_AAC_TIMEBASE: Fraction = Fraction::new(1, 48000);
 
-pub struct RtmpListener {
+demuxer!("rtmp://", RtmpDemuxer::create, RtmpDemuxer::probe);
+
+enum InitState {
+    Handshaking,
+    WaitForMedia,
+    FoundMedia,
+}
+
+pub struct RtmpDemuxer {
+    movie: Movie,
+
+    metadata: Option<StreamMetadata>,
+    init_state: InitState,
+    handshake: Handshake,
+    server_session: Option<ServerSession>,
+    queued_responses: Vec<Span<'static>>,
+    queued_results: VecDeque<ServerSessionResult>,
+
+    video_stream: Option<Track>,
+    audio_stream: Option<Track>,
+}
+
+impl Default for RtmpDemuxer {
+    fn default() -> Self {
+        RtmpDemuxer {
+            movie: Movie::default(),
+            metadata: None,
+            init_state: InitState::Handshaking,
+            handshake: Handshake::new(PeerType::Server),
+            server_session: None,
+            queued_responses: Vec::new(),
+            queued_results: VecDeque::new(),
+            video_stream: None,
+            audio_stream: None,
+        }
+    }
+}
+
+impl RtmpDemuxer {
+    fn accept_request(&mut self, id: u32) -> anyhow::Result<()> {
+        let responses = self
+            .server_session
+            .as_mut()
+            .unwrap()
+            .accept_request(id)
+            .context("Failed to accept request")?;
+        for response in responses {
+            if let ServerSessionResult::OutboundResponse(response) = response {
+                self.queued_responses.push(response.bytes.into());
+            }
+        }
+
+        Ok(())
+    }
+
+    fn handle_handshake(
+        &mut self,
+        mut input: &[u8],
+        buf: &mut dyn Buffered,
+    ) -> Result<(), DemuxerError> {
+        match self
+            .handshake
+            .process_bytes(&input)
+            .context("Failed to process handshake bytes")?
+        {
+            HandshakeProcessResult::InProgress { response_bytes } => {
+                self.queued_responses.push(response_bytes.into());
+                buf.consume(input.len());
+
+                return Err(DemuxerError::RequestWrite);
+            }
+            HandshakeProcessResult::Completed {
+                response_bytes,
+                remaining_bytes,
+            } => {
+                buf.consume(input.len() - remaining_bytes.len());
+
+                self.queued_responses.push(response_bytes.into());
+
+                let config = ServerSessionConfig::new();
+                let (mut session, responses) = ServerSession::new(config).unwrap();
+                for response in responses {
+                    if let ServerSessionResult::OutboundResponse(response) = response {
+                        self.queued_responses.push(response.bytes.into());
+                    }
+                }
+
+                self.init_state = InitState::WaitForMedia;
+
+                return Err(DemuxerError::RequestWrite);
+            }
+        }
+    }
+}
+
+impl Demuxer2 for RtmpDemuxer {
+    fn read_headers(
+        &mut self,
+        mut input: &[u8],
+        buf: &mut dyn Buffered,
+    ) -> Result<Movie, DemuxerError> {
+        while let Some(result) = self.queued_results.pop_front() {
+            match result {
+                ServerSessionResult::OutboundResponse(packet) => {
+                    self.queued_responses.push(packet.bytes.into());
+                }
+                ServerSessionResult::RaisedEvent(evt) => {
+                    if let ServerSessionEvent::ConnectionRequested {
+                        request_id,
+                        app_name: _,
+                    } = evt
+                    {
+                        self.accept_request(request_id)?;
+
+                        debug!("Accepted connection request");
+                    }
+
+                    if let ServerSessionEvent::PublishStreamRequested {
+                        request_id,
+                        ref app_name,
+                        ref stream_key,
+                        mode: _,
+                    } = evt
+                    {
+                        self.accept_request(request_id)?;
+                    }
+
+                    if let ServerSessionEvent::StreamMetadataChanged {
+                        ref app_name,
+                        ref stream_key,
+                        metadata,
+                    } = evt
+                    {
+                        self.metadata = Some(metadata);
+                    }
+                }
+                ServerSessionResult::UnhandleableMessageReceived(_payload) => {}
+            }
+        }
+
+        match self.init_state {
+            InitState::Handshaking => {
+                self.handle_handshake(input, buf)?;
+            }
+            InitState::WaitForMedia => {
+                if let Some(metadata) = &self.metadata {
+                    let expecting_video = metadata.video_width.is_some();
+                    let expecting_audio = metadata.audio_sample_rate.is_some();
+                }
+            }
+            InitState::FoundMedia => {
+                todo!("return movie here");
+            }
+        }
+
+        todo!()
+    }
+
+    fn writer_data(&mut self) -> Option<Span<'static>> {
+        if !self.queued_responses.is_empty() {
+            return Some(self.queued_responses.drain(..).collect::<Span>());
+        }
+
+        None
+    }
+
+    fn read_packet<'a>(
+        &mut self,
+        mut input: &'a [u8],
+        buf: &mut dyn Buffered,
+    ) -> Result<Option<Packet<'a>>, DemuxerError> {
+        todo!()
+    }
+
+    fn probe(data: &[u8]) -> ProbeResult {
+        ProbeResult::Unsure
+    }
+}
+
+/*pub struct RtmpListener {
     listener: TcpListener,
 }
 
@@ -216,7 +401,7 @@ async fn process(
     let (mut session, initial_results) = ServerSession::new(config)?;
 
     let results = session.handle_input(&remaining)?;
-
+size
     let mut r = VecDeque::new();
     let mut stream_info = None;
 
@@ -714,4 +899,4 @@ fn get_audio_codec_info(tag: &flvparse::AudioTag) -> anyhow::Result<media::Media
             codec: media::AudioCodec::Aac(codec),
         }),
     })
-}
+}*/
